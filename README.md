@@ -10,11 +10,11 @@ Widgets** service, tying the sibling repositories together end to end —
   **refinement types**
 - `pg-lean` — PostgreSQL client (with `tls13-lean` for TLS)
 
-The headline idea: **authorization is a refinement type**. Each RPC request
-is a `(Principal, request)` product whose message-level CEL rules *are* the
-authorization policy; the generated `AcmeValid.*` structure carries those
-policies as dependent propositions, so a handler holding a validated request
-holds a machine-checked proof that the policy was satisfied.
+The headline idea: **authorization policy as a refinement type**. Each RPC
+request is a `(Principal, request)` product whose message-level CEL rules
+*are* the authorization policy; the generated `AcmeValid.*` structure carries
+those policies as dependent propositions, so a handler holding a validated
+request holds a machine-checked proof that the policy was satisfied.
 
 ```lean
 -- generated from authz.proto's CEL:
@@ -24,6 +24,18 @@ structure CheckedCreateWidgetRequest where
   authz_create_self   : principal.toBase.id = request.toBase.user_id
   authz_create_editor : principal.toBase.role_level ≥ 2
 ```
+
+**Scope of the guarantee — authorization policy, not authentication.** The
+`Principal` is currently an ordinary wire field supplied by the client;
+identity is expected to come from a (future) authentication layer, as
+`proto/authz.proto` states. The propositions therefore establish *policy
+consistency by construction relative to the supplied principal* — e.g.
+`principal.id = request.user_id` — not end-to-end authorization tied to an
+authenticated identity. The intended completion is to derive the principal
+server-side (from mTLS identity or verified request metadata) inside
+grpc-lean's request-header authorizer — which runs before any request body is
+accepted — and construct the checked product from that authenticated
+principal instead of trusting the wire field.
 
 ## Layout
 
@@ -39,8 +51,25 @@ structure CheckedCreateWidgetRequest where
   authorization refinement types, hermetic).
 - `db/init.sql`, `docker-compose.yml` — postgres:18 (plain + TLS variants).
 
-This workspace is the root module; every sibling is wired via
-`local_path_override` in `MODULE.bazel`.
+## Getting the source
+
+All six ecosystem repositories must be checked out side by side —
+`MODULE.bazel` wires every sibling via Bzlmod `local_path_override`, and
+because transitive overrides are ignored for non-root modules, this root
+workspace re-declares all of them:
+
+```sh
+for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-acme-widgets; do
+  git clone "https://github.com/pb64-lean/$r"
+done
+cd lean-acme-widgets
+bazel test //...
+```
+
+Prerequisites: Bazel 8.5 (see `.bazelversion`; bazelisk recommended) and Nix
+— the Lean toolchain is nix-built from a pinned nixpkgs revision plus a Lean
+4.31-pre overlay. The end-to-end scripts additionally need Docker Compose,
+`grpcurl`, and `openssl`.
 
 ## Build & test
 
