@@ -1,0 +1,16 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_lean//lean:defs.bzl", "lean_binary")
+
+# In-process TLS end-to-end: Lean gRPC client → TLS → WidgetService → pg-lean.
+# Run via scripts/acme-grpc-tls.sh (needs postgres + generated certs).
+lean_binary(
+    name = "grpc_tls_test",
+    srcs = ["TlsClientTest.lean"],
+    deps = [
+        "//lean/Acme:service",
+        "//proto:acme_lean",
+        "@pg_lean//:pg_lean",
+        "@rules_lean_grpc//:grpc_lean",
+    ],
+)

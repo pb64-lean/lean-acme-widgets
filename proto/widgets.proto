@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package acme.v1;
+
+import "buf/validate/validate.proto";
+
+// The widget itself and the plain (pre-authorization) request/response
+// vocabulary. Authorization-checked products over these live in authz.proto.
+message Widget {
+  // 0 on create (assigned by the database).
+  uint64 id = 1;
+  uint64 owner_id = 2 [(buf.validate.field).uint64.gt = 0];
+  string name = 3 [(buf.validate.field).string = {min_len: 3, max_len: 64}];
+  string sku = 4 [(buf.validate.field).string.pattern = "^wgt-[0-9]{4,}$"];
+  uint32 quantity = 5 [(buf.validate.field).uint32.lte = 1000000];
+  string description = 6 [(buf.validate.field).string.max_len = 1024];
+}
+
+message CreateWidgetRequest {
+  // The user on whose behalf the widget is created.
+  uint64 user_id = 1 [(buf.validate.field).uint64.gt = 0];
+  Widget widget = 2 [(buf.validate.field).required = true];
+  // The new widget must belong to the requesting user — a proposition on the
+  // validated request, not a runtime convention.
+  option (buf.validate.message).cel = {
+    id: "create.owner_matches",
+    message: "widget.owner_id must equal user_id",
+    expression: "!has(this.widget) || this.widget.owner_id == this.user_id"
+  };
+}
+
+message GetWidgetRequest {
+  uint64 widget_id = 1 [(buf.validate.field).uint64.gt = 0];
+}
+
+message ListWidgetsRequest {
+  uint64 user_id = 1 [(buf.validate.field).uint64.gt = 0];
+  uint32 page_size = 2 [(buf.validate.field).uint32 = {gte: 1, lte: 100}];
+}
+
+message UpdateWidgetRequest {
+  uint64 user_id = 1 [(buf.validate.field).uint64.gt = 0];
+  Widget widget = 2 [(buf.validate.field).required = true];
+  option (buf.validate.message).cel = {
+    id: "update.owner_matches",
+    message: "widget.owner_id must equal user_id",
+    expression: "!has(this.widget) || this.widget.owner_id == this.user_id"
+  };
+  option (buf.validate.message).cel = {
+    id: "update.has_id",
+    message: "updated widget must carry its id",
+    expression: "!has(this.widget) || this.widget.id > 0u"
+  };
+}
+
+message DeleteWidgetRequest {
+  uint64 user_id = 1 [(buf.validate.field).uint64.gt = 0];
+  uint64 widget_id = 2 [(buf.validate.field).uint64.gt = 0];
+}
+
+message WidgetResponse {
+  Widget widget = 1;
+}
+
+message ListWidgetsResponse {
+  repeated Widget widgets = 1;
+}
+
+message DeleteWidgetResponse {
+  bool deleted = 1;
+}

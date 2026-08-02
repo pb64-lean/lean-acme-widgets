@@ -1,0 +1,15 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_lean//lean:defs.bzl", "lean_test")
+
+lean_test(
+    name = "smoke_test",
+    srcs = ["SmokeTest.lean"],
+    deps = ["//lean:acme"],
+)
+
+lean_test(
+    name = "acme_valid_test",
+    srcs = ["AcmeValidTest.lean"],
+    deps = ["//proto:acme_valid"],
+)

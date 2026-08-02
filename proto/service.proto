@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package acme.v1;
+
+import "proto/authz.proto";
+import "proto/widgets.proto";
+
+// The widget API. Every request type is an authorization-checked product
+// (see authz.proto): the server validates it into the AcmeValid refinement
+// type before touching the database, so the policy propositions hold by
+// construction inside every handler.
+service WidgetService {
+  rpc CreateWidget(CheckedCreateWidgetRequest) returns (WidgetResponse);
+  rpc GetWidget(CheckedGetWidgetRequest) returns (WidgetResponse);
+  rpc ListWidgets(CheckedListWidgetsRequest) returns (ListWidgetsResponse);
+  rpc UpdateWidget(CheckedUpdateWidgetRequest) returns (WidgetResponse);
+  rpc DeleteWidget(CheckedDeleteWidgetRequest) returns (DeleteWidgetResponse);
+}

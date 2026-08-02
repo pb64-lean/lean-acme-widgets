@@ -1,0 +1,17 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_lean//lean:defs.bzl", "lean_library")
+
+# Service source root. `lean/` is stripped from module names, so files here
+# elaborate as top-level modules (`Acme`, `Acme.*`).
+lean_library(
+    name = "acme",
+    srcs = ["Acme.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        "@pg_lean//:pg_lean",
+        "@protovalidate_lean//lean:protovalidate_cel",
+        "@protovalidate_lean//lean:protovalidate_runtime",
+        "@rules_lean_grpc//:grpc_lean",
+    ],
+)

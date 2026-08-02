@@ -1,0 +1,32 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
+load("@protovalidate_lean//protovalidate:defs.bzl", "lean_protovalidate_library")
+
+proto_library(
+    name = "acme_proto",
+    srcs = [
+        "authz.proto",
+        "service.proto",
+        "user.proto",
+        "widgets.proto",
+    ],
+    deps = [
+        "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
+    ],
+)
+
+# Base message/service types (modules AcmeLean.*).
+lean_proto_library(
+    name = "acme_lean",
+    proto = ":acme_proto",
+)
+
+# Validated refinement types (modules AcmeValid.*): CEL rules as dependent
+# propositions, validate/decodeValid/toBase per message.
+lean_protovalidate_library(
+    name = "acme_valid",
+    lean_proto = ":acme_lean",
+    proto = ":acme_proto",
+)

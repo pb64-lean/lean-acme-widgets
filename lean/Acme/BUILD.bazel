@@ -1,0 +1,38 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_lean//lean:defs.bzl", "lean_binary", "lean_library")
+
+# Persistence layer: widgets over pg-lean.
+lean_library(
+    name = "repo",
+    srcs = ["Repo.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        "//proto:acme_lean",
+        "@pg_lean//:pg_lean",
+    ],
+)
+
+# WidgetService handlers: validate into AcmeValid refinement types (authz by
+# construction), then call the repository.
+lean_library(
+    name = "service",
+    srcs = ["Service.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":repo",
+        "//proto:acme_lean",
+        "//proto:acme_valid",
+        "@rules_lean_grpc//:grpc_lean",
+    ],
+)
+
+lean_binary(
+    name = "acme_server",
+    srcs = ["Main.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":repo",
+        ":service",
+    ],
+)

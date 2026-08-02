@@ -1,0 +1,89 @@
+# lean-acme-widgets/MODULE.bazel
+"""Example Lean 4 software system: the "Acme Widgets" service.
+
+Ties together the sibling Lean ecosystem end to end — rules_lean (build),
+rules_lean_grpc (proto/gRPC codegen + runtime), protovalidate_lean (CEL
+refinement-type codegen + runtime), pg-lean (PostgreSQL client), and
+tls13-lean (TLS 1.3) — into one deployable service.
+
+This module is always the root of its own build; every sibling is wired with
+a local_path_override. Transitive overrides are ignored by Bzlmod when a
+module is not root, so ALL local modules in the dependency graph are
+re-declared here.
+"""
+
+module(
+    name = "lean-acme-widgets",
+    version = "0.1.0",
+    compatibility_level = 1,
+)
+
+# ── base Lean build rules ───────────────────────────────────────────────────
+bazel_dep(name = "rules_lean", version = "0.1.0")
+local_path_override(
+    module_name = "rules_lean",
+    path = "../rules_lean",
+)
+
+# ── proto/gRPC codegen rules and pure-Lean gRPC runtime ─────────────────────
+bazel_dep(name = "rules_lean_grpc", version = "0.1.0")
+local_path_override(
+    module_name = "rules_lean_grpc",
+    path = "../grpc-lean",
+)
+
+bazel_dep(name = "grpc_lean_protobuf", version = "0.1.0")
+local_path_override(
+    module_name = "grpc_lean_protobuf",
+    path = "../grpc-lean/third_party/Lean-zh/protobuf",
+)
+
+bazel_dep(name = "grpc_lean_protobuf_binary", version = "0.1.0")
+local_path_override(
+    module_name = "grpc_lean_protobuf_binary",
+    path = "../grpc-lean/third_party/Lean-zh/binary",
+)
+
+# ── protovalidate: CEL annotations → Lean refinement types ──────────────────
+bazel_dep(name = "protovalidate_lean", version = "0.1.0")
+local_path_override(
+    module_name = "protovalidate_lean",
+    path = "../protovalidate-lean",
+)
+
+# ── PostgreSQL client ───────────────────────────────────────────────────────
+bazel_dep(name = "pg-lean", version = "0.1.0", repo_name = "pg_lean")
+local_path_override(
+    module_name = "pg-lean",
+    path = "../pg-lean",
+)
+
+# ── TLS 1.3 (used by pg-lean; also directly available) ──────────────────────
+bazel_dep(name = "tls13-lean", version = "0.1.0", repo_name = "tls13_lean")
+local_path_override(
+    module_name = "tls13-lean",
+    path = "../tls13-lean",
+)
+
+# ── proto ecosystem (shared with the codegen modules) ───────────────────────
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "protobuf", version = "33.4")
+bazel_dep(name = "protovalidate", version = "1.2.2")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+
+# ── Lean toolchain (dev-only: not forced on consumers) ──────────────────────
+# Reuses the pinned nixpkgs + lean overlay from grpc_lean_protobuf, matching
+# every sibling workspace.
+lean = use_extension("@rules_lean//lean:extensions.bzl", "lean", dev_dependency = True)
+lean.nix_toolchain(
+    name = "lean4",
+    attr = "lean4_upstream_std",
+    nix_file = "@grpc_lean_protobuf//:nixpkgs.nix",
+    nix_file_deps = ["@grpc_lean_protobuf//:nixpkgs.json"],
+)
+use_repo(lean, "lean4_toolchain")
+
+register_toolchains(
+    "@lean4_toolchain//:all",
+    dev_dependency = True,
+)

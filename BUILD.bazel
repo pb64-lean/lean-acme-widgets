@@ -1,0 +1,5 @@
+# Root package of the lean-acme-widgets workspace.
+#
+# Sources live under lean/ (see lean/BUILD.bazel); protos, generated
+# libraries, and service binaries get their own packages as the system grows.
+package(default_visibility = ["//visibility:public"])

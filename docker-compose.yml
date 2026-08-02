@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: acme
+      POSTGRES_USER: acme
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "54398:5432"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # TLS-only variant (scripts/acme-e2e.sh tls): serves the .certs/ leaf and
+  # rejects plaintext TCP entirely (hostssl-only pg_hba), so a working service
+  # proves the pg-lean connection really is TLS.
+  postgres-tls:
+    image: postgres:18
+    profiles: ["tls"]
+    environment:
+      POSTGRES_DB: acme
+      POSTGRES_USER: acme
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "54397:5432"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./.certs:/certs:ro
+    entrypoint:
+      - bash
+      - -ceu
+      - |
+        install -o postgres -g postgres -m 0644 /certs/server.crt /tmp/server.crt
+        install -o postgres -g postgres -m 0600 /certs/server.key /tmp/server.key
+        install -o postgres -g postgres -m 0644 /certs/pg_hba.conf /tmp/pg_hba.conf
+        exec docker-entrypoint.sh postgres -c ssl=on \
+          -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key \
+          -c hba_file=/tmp/pg_hba.conf

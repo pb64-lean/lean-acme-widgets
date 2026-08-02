@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package acme.v1;
+
+import "buf/validate/validate.proto";
+
+// A user of the Acme Widgets system: the subject of authentication and the
+// owner of widgets. Field rules become Lean subtype refinements in
+// AcmeValid.user.
+message User {
+  uint64 id = 1 [(buf.validate.field).uint64.gt = 0];
+  string username = 2 [(buf.validate.field).string = {
+    min_len: 3,
+    max_len: 32,
+    pattern: "^[a-z][a-z0-9_]*$"
+  }];
+  string email = 3 [(buf.validate.field).string.email = true];
+  Role role = 4 [(buf.validate.field).enum = {defined_only: true, not_in: [0]}];
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_VIEWER = 1;
+  ROLE_EDITOR = 2;
+  ROLE_ADMIN = 3;
+}
