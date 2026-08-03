@@ -1,0 +1,29 @@
+name: e2e
+
+# End-to-end suites on the docker-capable self-hosted runner. The three
+# scripts share fixed host ports (54397/54398), the compose project name,
+# and .certs/ state, so they run strictly serially in ONE job; the single
+# lean-integration runner per machine serializes whole runs.
+# NEVER add pull_request here: these jobs run on self-hosted runners.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 10 * * 0"
+
+concurrency:
+  group: acme-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    uses: pb64-lean/.github/.github/workflows/integration.yml@main
+    with:
+      siblings: rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean
+      timeout_minutes: 90
+      run: |
+        scripts/acme-e2e.sh
+        scripts/acme-e2e.sh tls
+        scripts/acme-grpc-tls.sh
