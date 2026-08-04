@@ -1,25 +1,44 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_lean//lean:defs.bzl", "lean_binary", "lean_library")
+load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_binary", "lean_library")
 
-# Persistence layer: widgets over pg-lean.
+# Authentication layer: bearer-token resolution to an unfabricable
+# AuthenticatedPrincipal, plus the wire-principal binding predicate.
+lean_library(
+    name = "auth",
+    srcs = ["Auth.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        "//proto:acme_lean",
+        "//proto:acme_valid",
+        "@rules_lean_grpc//:grpc_lean",
+    ],
+)
+
+# Capability-typed persistence: repository functions take Authorized*
+# capabilities (validated request + authenticated principal + policy
+# propositions); checked SQL row decoding.
 lean_library(
     name = "repo",
     srcs = ["Repo.lean"],
     strip_module_prefix = "lean",
     deps = [
+        ":auth",
         "//proto:acme_lean",
+        "//proto:acme_valid",
         "@pg_lean//:pg_lean",
     ],
 )
 
-# WidgetService handlers: validate into AcmeValid refinement types (authz by
-# construction), then call the repository.
+# WidgetService handlers: pre-body bearer authentication (request-header
+# authorizer), refinement-type validation, principal binding, then the
+# capability-typed repository.
 lean_library(
     name = "service",
     srcs = ["Service.lean"],
     strip_module_prefix = "lean",
     deps = [
+        ":auth",
         ":repo",
         "//proto:acme_lean",
         "//proto:acme_valid",
@@ -31,6 +50,29 @@ lean_binary(
     name = "acme_server",
     srcs = ["Main.lean"],
     strip_module_prefix = "lean",
+    deps = [
+        ":auth",
+        ":repo",
+        ":service",
+    ],
+)
+
+# Compile-time audit: the capability-soundness and row-roundtrip theorems
+# (plus the generated validate soundness they build on) must exist, be
+# theorems, and use no axiom beyond the standard three (no sorryAx).
+lean_assurance_test(
+    name = "acme_assurance",
+    principal_theorems = [
+        "Acme.Repo.authorizeCreate_sound",
+        "Acme.Repo.authorizeCreate_none",
+        "Acme.Repo.AuthorizedCreate.sound",
+        "Acme.Repo.widgetOfRow_roundtrip",
+        "Acme.Repo.uint64OfInt_roundtrip",
+        "Acme.Repo.uint32OfInt_roundtrip",
+        "acme.v1.Valid.CheckedCreateWidgetRequest.validate_sound",
+        "acme.v1.Valid.CheckedCreateWidgetRequest.validate_complete",
+        "acme.v1.Valid.CheckedDeleteWidgetRequest.decodeValid_sound",
+    ],
     deps = [
         ":repo",
         ":service",

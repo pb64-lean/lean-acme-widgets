@@ -1,3 +1,4 @@
+import Acme.Auth
 import Acme.Repo
 import Acme.Service
 import Grpc
@@ -7,6 +8,12 @@ import Pg
 The Acme Widgets server: PostgreSQL via pg-lean (PG_URL, default the
 docker-compose instance) + the gRPC WidgetService (port from argv, default
 50061) with reflection enabled.
+
+Authentication: WidgetService methods require an `authorization: Bearer
+<token>` header, resolved against a token table BEFORE any request body is
+read (grpc-lean request-header authorizer). The table comes from
+`ACME_AUTH_TOKENS` (`token:id:role_level,...`) or defaults to the built-in
+demo table mirroring the e2e principals.
 
 TLS termination: if `ACME_TLS_CERT` (DER leaf certificate) and `ACME_TLS_KEY`
 (32-byte raw Ed25519 signing key) are set, the listener serves gRPC over
@@ -36,7 +43,17 @@ def main (args : List String) : IO Unit := do
     | .ok repo => pure repo
     | .error e => throw (IO.userError s!"repository init: {e}")
   IO.println s!"connected to postgres ({(← conn.parameter? "server_version").getD "?"})"
-  let registry := Acme.Service.registry repo
+  let table ← match ← IO.getEnv "ACME_AUTH_TOKENS" with
+    | some spec =>
+      match Acme.Auth.TokenTable.parse spec with
+      | .ok table =>
+        IO.println "auth: bearer-token table from ACME_AUTH_TOKENS"
+        pure table
+      | .error e => throw (IO.userError s!"ACME_AUTH_TOKENS: {e}")
+    | none =>
+      IO.println "auth: built-in demo bearer-token table"
+      pure Acme.Auth.demoTable
+  let registry := Acme.Service.registry repo table
   let config : Grpc.Server.Config := { address := Grpc.Server.anyIPv4 port }
 
   let tlsCert? ← IO.getEnv "ACME_TLS_CERT"
