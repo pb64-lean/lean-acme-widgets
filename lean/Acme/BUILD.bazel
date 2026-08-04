@@ -30,6 +30,20 @@ lean_library(
     ],
 )
 
+# Pure in-memory service model: applyCommand over capability commands, with
+# policy-preservation lemmas (kernel-checked via :acme_assurance).
+lean_library(
+    name = "model",
+    srcs = ["Model.lean"],
+    strip_module_prefix = "lean",
+    deps = [
+        ":auth",
+        ":repo",
+        "//proto:acme_lean",
+        "//proto:acme_valid",
+    ],
+)
+
 # WidgetService handlers: pre-body bearer authentication (request-header
 # authorizer), refinement-type validation, principal binding, then the
 # capability-typed repository.
@@ -69,11 +83,16 @@ lean_assurance_test(
         "Acme.Repo.widgetOfRow_roundtrip",
         "Acme.Repo.uint64OfInt_roundtrip",
         "Acme.Repo.uint32OfInt_roundtrip",
+        "Acme.Model.create_inserts_owned",
+        "Acme.Model.update_preserves_foreign",
+        "Acme.Model.delete_removes_named_only",
+        "Acme.Model.applyCommand_wellOwned",
         "acme.v1.Valid.CheckedCreateWidgetRequest.validate_sound",
         "acme.v1.Valid.CheckedCreateWidgetRequest.validate_complete",
         "acme.v1.Valid.CheckedDeleteWidgetRequest.decodeValid_sound",
     ],
     deps = [
+        ":model",
         ":repo",
         ":service",
     ],

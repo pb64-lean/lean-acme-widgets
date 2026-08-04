@@ -70,7 +70,8 @@ taken here.
   Int → UIntN row decoding with a row-roundtrip theorem), `Service.lean`
   (WidgetService handlers: pre-body authentication, refinement-type
   validation, principal binding, typed `RuleKind` violation classification),
-  `Main.lean` (`//lean/Acme:acme_server`).
+  `Model.lean` (pure in-memory service model over capability commands with
+  policy-preservation lemmas), `Main.lean` (`//lean/Acme:acme_server`).
 - `Integration/grpc_tls_test` — in-process TLS end-to-end.
 - `Test/` — `smoke_test` (ecosystem links), `acme_valid_test` (validation +
   authorization refinement types + authentication/binding/classification,
