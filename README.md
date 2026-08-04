@@ -132,12 +132,17 @@ proving the database link is genuinely TLS (a plaintext client is refused).
   `UNAUTHENTICATED` rejection (no token), a principal-binding denial, and two
   authz denials — exercising the whole stack under encryption.
 
-  Note: grpc-lean's TLS server accepts a deliberately narrow ClientHello
-  (X25519 + ChaCha20-Poly1305) and does not yet interoperate with mainstream
-  TLS stacks such as Go's `crypto/tls` (grpcurl) or OpenSSL `s_client`. The
-  in-process Lean client is therefore the interoperable — and more thorough —
-  verification. Broadening server-side ClientHello support is upstream work
-  in grpc-lean.
+  Mainstream TLS clients interoperate with this listener. The server
+  *negotiates* a single suite (TLS_CHACHA20_POLY1305_SHA256 / X25519 /
+  Ed25519), but it *selects* it from the client's offered overlap per
+  RFC 8446 rather than requiring an exact match, so unknown suites, groups,
+  extensions, and GREASE values are tolerated. grpc-lean's
+  `//examples/lean_proto:note_grpcurl_tls_interop_test` drives the same
+  `serveTls` path end to end with **grpcurl** over ALPN `h2` (unary,
+  streaming, reflection-only invocation, and a 90 kB payload spanning many
+  TLS records) and checks the TLS layer independently with
+  `openssl s_client`. The remaining honest limitation: a client offering
+  none of those three algorithms gets a handshake failure, not a fallback.
 
 - **Listener termination**: `Main.lean` shuts the listener down gracefully on
   a stdin line or EOF (`Grpc.Server.shutdown` then `wait` to drain in-flight
