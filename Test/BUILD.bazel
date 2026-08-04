@@ -11,5 +11,11 @@ lean_test(
 lean_test(
     name = "acme_valid_test",
     srcs = ["AcmeValidTest.lean"],
-    deps = ["//proto:acme_valid"],
+    deps = [
+        "//lean/Acme:auth",
+        "//lean/Acme:repo",
+        "//lean/Acme:service",
+        "//proto:acme_valid",
+        "@rules_lean_grpc//:grpc_lean",
+    ],
 )

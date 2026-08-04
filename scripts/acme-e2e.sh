@@ -85,69 +85,95 @@ GRPCURL=(grpcurl -plaintext -import-path . -import-path "$VALIDATE_ROOT" -proto 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1"; echo "$2" | sed 's/^/  | /'; FAILS=$((FAILS + 1)); }
 
-call() { "${GRPCURL[@]}" -d "$2" "$ADDR" "acme.v1.WidgetService/$1" 2>&1; }
+# call METHOD TOKEN BODY — TOKEN "" sends no authorization header.
+call() {
+  local method="$1" token="$2" body="$3"
+  if [[ -n "$token" ]]; then
+    "${GRPCURL[@]}" -H "authorization: Bearer ${token}" -d "$body" "$ADDR" \
+      "acme.v1.WidgetService/$method" 2>&1
+  else
+    "${GRPCURL[@]}" -d "$body" "$ADDR" "acme.v1.WidgetService/$method" 2>&1
+  fi
+}
 
 expect_contains() {
   local label="$1" out="$2" needle="$3"
   if grep -q "$needle" <<<"$out"; then pass "$label"; else fail "$label" "$out"; fi
 }
 
-EDITOR='{"id":"7","roleLevel":2}'
-VIEWER='{"id":"7","roleLevel":1}'
-ADMIN='{"id":"99","roleLevel":3}'
-STRANGER='{"id":"8","roleLevel":2}'
+# Wire principals and the bearer tokens that authenticate them (the server's
+# demo token table; see Acme.Auth.demoEntries). The handler additionally
+# verifies the wire principal matches the token's identity.
+EDITOR='{"id":"7","roleLevel":2}';   T_EDITOR=acme-editor-7
+VIEWER='{"id":"7","roleLevel":1}';   T_VIEWER=acme-viewer-7
+ADMIN='{"id":"99","roleLevel":3}';   T_ADMIN=acme-admin-99
+STRANGER='{"id":"8","roleLevel":2}'; T_STRANGER=acme-editor-8
 WIDGET='{"ownerId":"7","name":"Left-handed flange","sku":"wgt-1024","quantity":5}'
+CREATE_BODY="{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}"
+
+# ── authentication: rejected at request headers, before the body ──────────
+OUT=$(call CreateWidget "" "$CREATE_BODY") || true
+expect_contains "auth.missing_token" "$OUT" "Unauthenticated"
+expect_contains "auth.missing_token_detail" "$OUT" "missing authorization bearer token"
+OUT=$(call CreateWidget "no-such-token" "$CREATE_BODY") || true
+expect_contains "auth.unknown_token" "$OUT" "Unauthenticated"
+expect_contains "auth.unknown_token_detail" "$OUT" "unknown bearer token"
+# valid token, but the wire principal names someone else → binding rejection
+OUT=$(call CreateWidget "$T_STRANGER" "$CREATE_BODY") || true
+expect_contains "auth.principal_mismatch" "$OUT" "PermissionDenied"
+expect_contains "auth.principal_mismatch_detail" "$OUT" \
+  "wire principal does not match the authenticated caller"
 
 # create (editor, self) — expect assigned id 1
-OUT=$(call CreateWidget "{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}")
+OUT=$(call CreateWidget "$T_EDITOR" "$CREATE_BODY")
 expect_contains "create.editor_self" "$OUT" '"id": "1"'
 
 # create denied: viewer rank
-OUT=$(call CreateWidget "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}") || true
+OUT=$(call CreateWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}") || true
 expect_contains "create.viewer_denied" "$OUT" "PermissionDenied"
 expect_contains "create.viewer_rule_id" "$OUT" "authz.create.editor"
 
-# create denied: on someone else's behalf
-OUT=$(call CreateWidget "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}") || true
+# create denied: on someone else's behalf (authenticated as 8, asking for 7)
+OUT=$(call CreateWidget "$T_STRANGER" "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"widget\":${WIDGET}}}") || true
 expect_contains "create.stranger_denied" "$OUT" "authz.create.self"
 
 # create rejected: bad sku (field rule → InvalidArgument)
 BAD=$(sed 's/wgt-1024/bogus/' <<<"$WIDGET")
-OUT=$(call CreateWidget "{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${BAD}}}") || true
+OUT=$(call CreateWidget "$T_EDITOR" "{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${BAD}}}") || true
 expect_contains "create.bad_sku" "$OUT" "InvalidArgument"
 expect_contains "create.bad_sku_rule" "$OUT" "string.pattern"
 
 # get (any authenticated principal)
-OUT=$(call GetWidget "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}")
+OUT=$(call GetWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}")
 expect_contains "get.found" "$OUT" '"sku": "wgt-1024"'
-OUT=$(call GetWidget "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"555\"}}") || true
+OUT=$(call GetWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"555\"}}") || true
 expect_contains "get.not_found" "$OUT" "NotFound"
 
 # list: self ok, admin ok, stranger denied
-OUT=$(call ListWidgets "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"pageSize\":10}}")
+OUT=$(call ListWidgets "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"pageSize\":10}}")
 expect_contains "list.self" "$OUT" '"name": "Left-handed flange"'
-OUT=$(call ListWidgets "{\"principal\":${ADMIN},\"request\":{\"userId\":\"7\",\"pageSize\":10}}")
+OUT=$(call ListWidgets "$T_ADMIN" "{\"principal\":${ADMIN},\"request\":{\"userId\":\"7\",\"pageSize\":10}}")
 expect_contains "list.admin" "$OUT" '"name": "Left-handed flange"'
-OUT=$(call ListWidgets "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"pageSize\":10}}") || true
+OUT=$(call ListWidgets "$T_STRANGER" "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"pageSize\":10}}") || true
 expect_contains "list.stranger_denied" "$OUT" "authz.list.self_or_admin"
 
 # update: editor rewrites own widget
 UPD='{"id":"1","ownerId":"7","name":"Right-handed flange","sku":"wgt-1024","quantity":6}'
-OUT=$(call UpdateWidget "{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${UPD}}}")
+OUT=$(call UpdateWidget "$T_EDITOR" "{\"principal\":${EDITOR},\"request\":{\"userId\":\"7\",\"widget\":${UPD}}}")
 expect_contains "update.editor" "$OUT" "Right-handed flange"
-OUT=$(call GetWidget "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}")
+OUT=$(call GetWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}")
 expect_contains "update.persisted" "$OUT" "Right-handed flange"
 
 # update denied for viewer rank
-OUT=$(call UpdateWidget "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"widget\":${UPD}}}") || true
+OUT=$(call UpdateWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"userId\":\"7\",\"widget\":${UPD}}}") || true
 expect_contains "update.viewer_denied" "$OUT" "authz.update.editor"
 
 # delete: stranger denied, admin allowed
-OUT=$(call DeleteWidget "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"widgetId\":\"1\"}}") || true
+OUT=$(call DeleteWidget "$T_STRANGER" "{\"principal\":${STRANGER},\"request\":{\"userId\":\"7\",\"widgetId\":\"1\"}}") || true
 expect_contains "delete.stranger_denied" "$OUT" "authz.delete.self_or_admin"
-OUT=$(call DeleteWidget "{\"principal\":${ADMIN},\"request\":{\"userId\":\"7\",\"widgetId\":\"1\"}}")
+OUT=$(call DeleteWidget "$T_ADMIN" "{\"principal\":${ADMIN},\"request\":{\"userId\":\"7\",\"widgetId\":\"1\"}}")
 expect_contains "delete.admin" "$OUT" '"deleted": true'
-OUT=$(call GetWidget "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}") || true
+OUT=$(call GetWidget "$T_VIEWER" "{\"principal\":${VIEWER},\"request\":{\"widgetId\":\"1\"}}") || true
 expect_contains "delete.gone" "$OUT" "NotFound"
 
 if [[ "$MODE" == "tls" ]]; then

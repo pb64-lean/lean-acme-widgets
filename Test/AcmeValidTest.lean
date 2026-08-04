@@ -4,6 +4,10 @@ import AcmeLean.authz
 import AcmeValid.user
 import AcmeValid.widgets
 import AcmeValid.authz
+import Acme.Auth
+import Acme.Repo
+import Acme.Service
+import Grpc
 
 /-!
 Validation + authorization refinement types, hermetically: field rules on
@@ -11,6 +15,11 @@ User/Widget, the message-level ownership rule on CreateWidgetRequest, and the
 (Principal, request) authorization products whose CEL policies are dependent
 propositions in `AcmeValid` structures. Every rejection is asserted by rule
 id; the accepted cases demonstrate handlers can *use* the carried proofs.
+
+Phase 7 additions: the bearer-token authentication layer (`Acme.Auth`), the
+wire-principal binding and capability smart constructors (`Acme.Repo`), the
+typed violation classification (`Acme.Service.ruleKind`), and the checked
+Int → UIntN row conversions.
 -/
 
 open acme.v1
@@ -41,6 +50,16 @@ def admin : Principal := { id := 99, role_level := 3 }
 def viewer : Principal := { id := 7, role_level := 1 }
 
 def createReq : CreateWidgetRequest := { user_id := 7, widget := some goodWidget }
+
+/-- Expect a violation with rule id `id` whose typed classification maps to
+gRPC status `code`. -/
+def expectStatus (r : Except Protovalidate.Violation α) (id : String)
+    (code : Grpc.Code) (label : String) : IO Unit := do
+  match r with
+  | .ok _ => throw (IO.userError s!"{label}: expected violation {id}, got ok")
+  | .error e =>
+    expect (e.ruleId == id) s!"{label}: expected {id}, got {e.ruleId}"
+    expect ((Acme.Service.statusOfViolation e).code == code) s!"{label}: wrong status code"
 
 def main : IO Unit := do
   -- ── field rules ─────────────────────────────────────────────────────────
@@ -140,4 +159,99 @@ def main : IO Unit := do
     | .ok v => expect (v.toBase.user_id == 7) "decodeValid roundtrip"
     | .error e => throw (IO.userError s!"decodeValid: {e}")
 
-  IO.println "all acme validation and authorization assertions passed"
+  -- ── authentication: bearer-token table ─────────────────────────────────
+  let table := Acme.Auth.demoTable
+  let headers (auth? : Option String) : Grpc.Metadata :=
+    match auth? with
+    | some v => Grpc.Metadata.empty.insert "authorization" v
+    | none => Grpc.Metadata.empty
+  let authEditor7 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-editor-7")) with
+    | .ok p => pure p
+    | .error s => throw (IO.userError s!"editor-7 token rejected: {s.messageD}")
+  expect (authEditor7.id == 7 && authEditor7.roleLevel == 2) "editor-7 identity"
+  let authViewer7 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-viewer-7")) with
+    | .ok p => pure p
+    | .error s => throw (IO.userError s!"viewer-7 token rejected: {s.messageD}")
+  let authEditor8 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-editor-8")) with
+    | .ok p => pure p
+    | .error s => throw (IO.userError s!"editor-8 token rejected: {s.messageD}")
+  let expectUnauthenticated (auth? : Option String) (label : String) : IO Unit := do
+    match Acme.Auth.authenticate table (headers auth?) with
+    | .ok p => throw (IO.userError s!"{label}: unexpectedly authenticated {p}")
+    | .error s => expect (s.code == .unauthenticated) s!"{label}: wrong code"
+  expectUnauthenticated none "missing header"
+  expectUnauthenticated (some "Bearer bogus") "unknown token"
+  expectUnauthenticated (some "Basic acme-editor-7") "wrong scheme"
+
+  -- misconfigured tables fail at construction
+  expect (Acme.Auth.TokenTable.parse "t:7:2,u:8:1" |>.isOk) "valid spec parses"
+  expect (!(Acme.Auth.TokenTable.parse "t:0:2" |>.isOk)) "id 0 rejected"
+  expect (!(Acme.Auth.TokenTable.parse "t:7:4" |>.isOk)) "role 4 rejected"
+  expect (!(Acme.Auth.TokenTable.parse "gibberish" |>.isOk)) "malformed spec rejected"
+
+  -- ── binding: wire principal must equal the authenticated caller ────────
+  match Valid.CheckedCreateWidgetRequest.validate (checkedCreate editor createReq) with
+  | .error e => throw (IO.userError s!"binding demo validate: {e}")
+  | .ok v =>
+    match Acme.Repo.authorizeCreate authEditor7 v with
+    | none => throw (IO.userError "bound create was refused")
+    | some cap =>
+      -- the capability carries the policy relative to the AUTHENTICATED principal
+      let _ : cap.request.widget.toBase.owner_id = cap.principal.id := cap.owner_eq
+      let _ : 2 ≤ cap.principal.roleLevel := cap.editor
+      expect (cap.principal.id == 7) "capability principal"
+    -- same wire request, different authenticated identities: refused
+    expect (Acme.Repo.authorizeCreate authViewer7 v |>.isNone) "role mismatch refused"
+    expect (Acme.Repo.authorizeCreate authEditor8 v |>.isNone) "id mismatch refused"
+
+  -- ── typed violation classification ─────────────────────────────────────
+  -- all runtime-reachable authz.* rules map to PERMISSION_DENIED...
+  expectStatus (Valid.CheckedCreateWidgetRequest.validate
+      (checkedCreate { editor with id := 8 } createReq))
+    "authz.create.self" .permissionDenied "classify create.self"
+  expectStatus (Valid.CheckedCreateWidgetRequest.validate (checkedCreate viewer createReq))
+    "authz.create.editor" .permissionDenied "classify create.editor"
+  expectStatus (Valid.CheckedListWidgetsRequest.validate
+      { principal := some { viewer with id := 8 },
+        request := some { user_id := 7, page_size := 20 } })
+    "authz.list.self_or_admin" .permissionDenied "classify list.self_or_admin"
+  let updReq : UpdateWidgetRequest :=
+    { user_id := 7, widget := some { goodWidget with id := 41 } }
+  expectStatus (Valid.CheckedUpdateWidgetRequest.validate
+      { principal := some { editor with id := 8 }, request := some updReq })
+    "authz.update.self" .permissionDenied "classify update.self"
+  expectStatus (Valid.CheckedUpdateWidgetRequest.validate
+      { principal := some viewer, request := some updReq })
+    "authz.update.editor" .permissionDenied "classify update.editor"
+  expectStatus (Valid.CheckedDeleteWidgetRequest.validate
+      { principal := some { viewer with id := 8 },
+        request := some { user_id := 7, widget_id := 41 } })
+    "authz.delete.self_or_admin" .permissionDenied "classify delete.self_or_admin"
+  -- (authz.update.widget_owner is unreachable at runtime — it is implied by
+  -- update.owner_matches + authz.update.self — but classified by the same
+  -- #guard-checked mapping in Acme.Service.)
+  -- ... and field rules to INVALID_ARGUMENT
+  expectStatus (Valid.Widget.validate { goodWidget with sku := "bogus" })
+    "string.pattern" .invalidArgument "classify field rule"
+  expectStatus (Valid.CheckedCreateWidgetRequest.validate
+      { principal := none, request := some createReq })
+    "required" .invalidArgument "classify required"
+  expect (Acme.Service.authzRuleIds.all
+      (fun id => (Acme.Service.statusOfViolation ⟨"", id, ""⟩).code == .permissionDenied))
+    "every declared authz rule id classifies as PERMISSION_DENIED"
+
+  -- ── checked DB conversions ─────────────────────────────────────────────
+  expect (Acme.Repo.uint64OfInt "c" (-1) |>.isOk |> not) "negative rejected (uint64)"
+  expect (Acme.Repo.uint64OfInt "c" ((2 : Int) ^ 64) |>.isOk |> not) "2^64 rejected"
+  expect (Acme.Repo.uint32OfInt "c" ((2 : Int) ^ 32) |>.isOk |> not) "2^32 rejected"
+  expect (match Acme.Repo.uint64OfInt "c" 42 with
+    | .ok v => v == 42
+    | .error _ => false) "in-range uint64 accepted"
+  match Acme.Repo.widgetOfRow 1 7 "Left-handed flange" "wgt-1024" 5 "" with
+  | .error e => throw (IO.userError s!"widgetOfRow: {e}")
+  | .ok w =>
+    expect (w.id == 1 && w.owner_id == 7 && w.quantity == 5) "widgetOfRow fields"
+  expect (Acme.Repo.widgetOfRow 1 (-7) "n" "s" 5 "" |>.isOk |> not)
+    "negative owner_id rejected"
+
+  IO.println "all acme validation, authorization, and authentication assertions passed"
