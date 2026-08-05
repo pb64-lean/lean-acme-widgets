@@ -12,7 +12,7 @@ Widgets** service, tying the sibling repositories together end to end —
   **refinement types**
 - `pg-lean` — PostgreSQL client (with `tls13-lean` for TLS)
 
-The headline idea: **authorization by construction**. Each RPC request is a
+The service enforces **authorization by construction**. Each RPC request is a
 `(Principal, request)` product whose message-level CEL rules *are* the
 authorization policy; the generated `AcmeValid.*` structure carries those
 policies as dependent propositions, so a handler holding a validated request
@@ -39,8 +39,8 @@ authentication mints an `Acme.Auth.AuthenticatedPrincipal` — a type that is
 holding one is evidence a configured token vouched for that identity) — and
 the accept-capability the authorizer returns is a handler closing over it.
 
-The wire `Principal` field is kept for proto compatibility, but is now
-*bound* to the authenticated identity: after validation, the handler's single
+The wire `Principal` field is *bound* to the authenticated identity: after
+validation, the handler's single
 binding check (`Auth.Bound` — wire id and role_level equal the authenticated
 principal's) turns every generated `authz.*` proposition into one about the
 *authenticated* caller. A valid token presenting someone else's principal is
@@ -51,12 +51,12 @@ then crosses the repository boundary as per-operation capabilities
 authenticated id` and `editor : role_level ≥ 2`; see
 `authorizeCreate_sound`), erased only at SQL parameter serialization.
 
-What remains trusted: the token table itself (configuration:
+The trusted boundary includes the token table itself (configuration:
 `ACME_AUTH_TOKENS=token:id:role_level,...`, or a built-in demo table) and
-transport confidentiality for tokens (serve TLS in production). A possible
-future step is removing the wire `Principal` entirely and generating checked
-products over the server-side principal — a breaking proto change, so not
-taken here.
+transport confidentiality for tokens (serve TLS in production). The public
+protocol includes the wire `Principal`; removing it and generating checked
+products over only the server-side principal is outside the compatibility
+contract because it changes the protobuf API.
 
 ## Layout
 
@@ -141,8 +141,8 @@ proving the database link is genuinely TLS (a plaintext client is refused).
   `serveTls` path end to end with **grpcurl** over ALPN `h2` (unary,
   streaming, reflection-only invocation, and a 90 kB payload spanning many
   TLS records) and checks the TLS layer independently with
-  `openssl s_client`. The remaining honest limitation: a client offering
-  none of those three algorithms gets a handshake failure, not a fallback.
+  `openssl s_client`. **Algorithm constraint:** a client offering none of
+  those three algorithms gets a handshake failure rather than a fallback.
 
 - **Listener termination**: `Main.lean` shuts the listener down gracefully on
   a stdin line or EOF (`Grpc.Server.shutdown` then `wait` to drain in-flight
