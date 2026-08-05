@@ -267,13 +267,13 @@ theorem widgetOfRow_roundtrip (id owner : UInt64) (name sku : String)
 -- ── SQL ───────────────────────────────────────────────────────────────────
 
 def migrate (conn : Connection) : IO (Except Error Unit) := do
-  pure ((← conn.exec "CREATE TABLE IF NOT EXISTS widgets (
+  pure ((← (conn.exec "CREATE TABLE IF NOT EXISTS widgets (
       id BIGSERIAL PRIMARY KEY CHECK (id > 0),
       owner_id BIGINT NOT NULL CHECK (owner_id >= 0),
       name TEXT NOT NULL,
       sku TEXT NOT NULL,
       quantity BIGINT NOT NULL CHECK (quantity >= 0 AND quantity < 4294967296),
-      description TEXT NOT NULL DEFAULT '')").map (fun _ => ()))
+      description TEXT NOT NULL DEFAULT '')").block).map (fun _ => ()))
 
 private def prepared : Array (String × String) := #[
   ("w_insert",
@@ -295,7 +295,7 @@ def open' (conn : Connection) : IO (Except Error Repo) := do
   if let .error e := ← migrate conn then
     return .error e
   for (name, sql) in prepared do
-    if let .error e := ← conn.prepare name sql then
+    if let .error e := ← (conn.prepare name sql).block then
       return .error e
   pure (.ok { conn })
 
@@ -320,12 +320,12 @@ private def decodeError (what e : String) : Error :=
 `cap.owner_eq` proves the serialized owner is the authenticated principal. -/
 def insertWidget (repo : Repo) (cap : AuthorizedCreate) : IO (Except Error UInt64) := do
   let w := cap.request.widget.toBase
-  match ← repo.conn.execute "w_insert" #[
+  match ← (repo.conn.execute "w_insert" #[
       textParam (toString w.owner_id.toNat),
       textParam w.name,
       textParam w.sku,
       textParam (toString w.quantity.toNat),
-      textParam w.description] with
+      textParam w.description]).block with
   | .error e => pure (.error e)
   | .ok rows =>
     match rows.get (α := Int) 0 0 with
@@ -336,8 +336,8 @@ def insertWidget (repo : Repo) (cap : AuthorizedCreate) : IO (Except Error UInt6
     | .error e => pure (.error (decodeError "insert returning" e))
 
 def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Widget)) := do
-  match ← repo.conn.execute "w_get" #[
-      textParam (toString cap.request.widget_id.val.toNat)] with
+  match ← (repo.conn.execute "w_get" #[
+      textParam (toString cap.request.widget_id.val.toNat)]).block with
   | .error e => pure (.error e)
   | .ok rows =>
     if rows.rows.isEmpty then
@@ -350,9 +350,9 @@ def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Wid
 /-- List the capability's user's widgets; `cap.self_or_admin` proves the
 listed owner is the authenticated principal, or the principal is admin. -/
 def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array Widget)) := do
-  match ← repo.conn.execute "w_list" #[
+  match ← (repo.conn.execute "w_list" #[
       textParam (toString cap.request.user_id.val.toNat),
-      textParam (toString cap.request.page_size.val.toNat)] with
+      textParam (toString cap.request.page_size.val.toNat)]).block with
   | .error e => pure (.error e)
   | .ok rows => Id.run do
     let mut out := #[]
@@ -367,22 +367,22 @@ def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array W
 principal, `cap.has_id` that the id predicate is non-degenerate. -/
 def updateWidget (repo : Repo) (cap : AuthorizedUpdate) : IO (Except Error Bool) := do
   let w := cap.request.widget.toBase
-  match ← repo.conn.execute "w_update" #[
+  match ← (repo.conn.execute "w_update" #[
       textParam (toString w.id.toNat),
       textParam (toString w.owner_id.toNat),
       textParam w.name,
       textParam w.sku,
       textParam (toString w.quantity.toNat),
-      textParam w.description] with
+      textParam w.description]).block with
   | .error e => pure (.error e)
   | .ok rows => pure (.ok (rows.rows.size == 1))
 
 /-- Delete by (id, owner); `false` when nothing matched. `cap.self_or_admin`
 proves the named owner is the authenticated principal, or admin override. -/
 def deleteWidget (repo : Repo) (cap : AuthorizedDelete) : IO (Except Error Bool) := do
-  match ← repo.conn.execute "w_delete" #[
+  match ← (repo.conn.execute "w_delete" #[
       textParam (toString cap.request.widget_id.val.toNat),
-      textParam (toString cap.request.user_id.val.toNat)] with
+      textParam (toString cap.request.user_id.val.toNat)]).block with
   | .error e => pure (.error e)
   | .ok rows => pure (.ok (rows.rows.size == 1))
 

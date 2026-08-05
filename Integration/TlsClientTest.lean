@@ -44,7 +44,7 @@ def checkedCreate (p : Principal) (userId : UInt64) : CheckedCreateWidgetRequest
 
 def main : IO Unit := do
   let pgUrl := (← IO.getEnv "PG_URL").getD "postgres://acme@localhost:54398/acme"
-  let conn ← Pg.connectUri pgUrl
+  let conn ← (Pg.connectUri pgUrl).block
   let repo ← match ← Acme.Repo.open' conn with
     | .ok repo => pure repo
     | .error e => throw (IO.userError s!"repo: {e}")
@@ -121,7 +121,7 @@ def main : IO Unit := do
     expect (status.code == Grpc.Code.permissionDenied) "cross-principal PermissionDenied"
     IO.println "TLS cross-principal denial ok"
 
-  Grpc.Client.close client
+  (Grpc.Client.close client).block
   -- graceful listener termination
   Grpc.Server.shutdown server
   Grpc.Server.wait server

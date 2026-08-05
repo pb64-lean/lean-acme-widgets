@@ -38,11 +38,11 @@ def main (args : List String) : IO Unit := do
   let port := match args with
     | p :: _ => UInt16.ofNat (p.toNat?.getD 50061)
     | [] => 50061
-  let conn ← Pg.connectUri pgUrl
+  let conn ← (Pg.connectUri pgUrl).block
   let repo ← match ← Acme.Repo.open' conn with
     | .ok repo => pure repo
     | .error e => throw (IO.userError s!"repository init: {e}")
-  IO.println s!"connected to postgres ({(← conn.parameter? "server_version").getD "?"})"
+  IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
   let table ← match ← IO.getEnv "ACME_AUTH_TOKENS" with
     | some spec =>
       match Acme.Auth.TokenTable.parse spec with
