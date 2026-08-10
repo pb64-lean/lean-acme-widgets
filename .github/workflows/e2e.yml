@@ -21,7 +21,7 @@ jobs:
   e2e:
     uses: pb64-lean/.github/.github/workflows/integration.yml@main
     with:
-      siblings: rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean
+      siblings: rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx
       timeout_minutes: 90
       run: |
         scripts/acme-e2e.sh

@@ -10,7 +10,9 @@ Widgets** service, tying the sibling repositories together end to end —
   runtime, and TLS 1.3 (client + server termination)
 - `protovalidate-lean` — buf.validate CEL annotations compiled to Lean
   **refinement types**
-- `pg-lean` — PostgreSQL client (with `tls13-lean` for TLS)
+- `lean-pgx` — DDL/query analysis, generated checked records and runners,
+  runtime schema attachment, and relational contract metadata
+- `pg-lean` — PostgreSQL wire/TLS transport beneath lean-pgx
 
 The service enforces **authorization by construction**. Each RPC request is a
 `(Principal, request)` product whose message-level CEL rules *are* the
@@ -49,7 +51,8 @@ principal's) turns every generated `authz.*` proposition into one about the
 then crosses the repository boundary as per-operation capabilities
 (`Acme.Repo.AuthorizedCreate` carries `owner_eq : widget owner =
 authenticated id` and `editor : role_level ≥ 2`; see
-`authorizeCreate_sound`), erased only at SQL parameter serialization.
+`authorizeCreate_sound`), then is projected into the generated query's typed
+parameters.
 
 The trusted boundary includes the token table itself (configuration:
 `ACME_AUTH_TOKENS=token:id:role_level,...`, or a built-in demo table) and
@@ -65,30 +68,36 @@ contract because it changes the protobuf API.
   (`AcmeLean.*`) + `lean_protovalidate_library` (`AcmeValid.*`).
 - `lean/Acme/` — `Auth.lean` (bearer-token authentication; unfabricable
   `AuthenticatedPrincipal`, `Bound` binding predicate), `Repo.lean`
-  (capability-typed widget persistence over pg-lean: `Authorized*`
-  capabilities, `authorize*` smart constructors + soundness lemmas, checked
-  Int → UIntN row decoding with a row-roundtrip theorem), `Service.lean`
+  (capability-typed persistence through generated lean-pgx runners:
+  `Authorized*` capabilities, `authorize*` smart constructors + soundness
+  lemmas, and the checked PostgreSQL `Int64` ↔ protobuf unsigned adapter),
+  `Service.lean`
   (WidgetService handlers: pre-body authentication, refinement-type
   validation, principal binding, typed `RuleKind` violation classification),
   `Model.lean` (pure in-memory service model over capability commands with
   policy-preservation lemmas), `Main.lean` (`//lean/Acme:acme_server`).
-- `Integration/grpc_tls_test` — in-process TLS end-to-end.
+- `//Integration:grpc_tls_test` — in-process TLS end-to-end;
+  `//Integration:lean_pgx_live_test{,_pg17}` — fresh PostgreSQL clusters,
+  migration, attachment, and all five generated CRUD runners.
 - `Test/` — `smoke_test` (ecosystem links), `acme_valid_test` (validation +
   authorization refinement types + authentication/binding/classification,
   hermetic), `//lean/Acme:acme_assurance` (compile-time audit: capability
   soundness + roundtrip theorems exist and are axiom-clean).
-- `db/init.sql`, `docker-compose.yml` — postgres:18 (plain + TLS variants),
-  with CHECK constraints mirroring the proto numeric ranges.
+- `db/migrations/0001_schema.sql` — canonical DDL consumed by lean-pgx,
+  Docker, and live tests; `db/queries/` — one literal SQL statement per
+  generated runner; `db/fixtures/0001_seed.sql` — local/demo data only.
+- `docker-compose.yml` — postgres:18 (plain + TLS variants), initialized from
+  the canonical migration and demo fixture.
 
 ## Getting the source
 
-All six ecosystem repositories must be checked out side by side —
+All seven ecosystem repositories must be checked out side by side —
 `MODULE.bazel` wires every sibling via Bzlmod `local_path_override`, and
 because transitive overrides are ignored for non-root modules, this root
 workspace re-declares all of them:
 
 ```sh
-for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-acme-widgets; do
+for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lean-acme-widgets; do
   git clone "https://github.com/pb64-lean/$r"
 done
 cd lean-acme-widgets
@@ -103,8 +112,8 @@ Prerequisites: Bazel 8.5 (see `.bazelversion`; bazelisk recommended) and Nix
 ## Build & test
 
 ```
-bazel test //...                 # hermetic: smoke + validation/authz refinement types
-scripts/acme-e2e.sh              # compose postgres + server + grpcurl, 18 checks
+bazel test //...                 # includes transient PostgreSQL generation/live/compat tests
+scripts/acme-e2e.sh              # compose postgres + server + grpcurl, 24 checks
 scripts/acme-e2e.sh tls          # ... with the pg-lean → postgres link over TLS (verify-full)
 scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
@@ -119,6 +128,16 @@ happy paths, all runtime-reachable `authz.*` denial rules (by rule id →
 `NotFound`, cross-call persistence, and graceful listener shutdown. `tls`
 serves postgres with hostssl-only pg_hba and connects `sslmode=verify-full`,
 proving the database link is genuinely TLS (a plaintext client is refused).
+
+`bazel test //...` does not use a developer database. The `//db:acme_db`
+build action starts an action-private PostgreSQL 18 cluster, replays the real
+DDL, asks PostgreSQL to analyze all five literal query files, and emits the
+`AcmeDb` Lean API. `//db:acme_db_pg17_pg18_test` repeats analysis on both
+supported majors, while `//Integration:lean_pgx_live_test` and its `_pg17`
+variant start fresh clusters and exercise attachment plus
+insert/get/list/update/delete at runtime. Production startup intentionally
+does not run DDL: deployment must apply `db/migrations/0001_schema.sql` before
+`AcmeDb.attach`; Docker Compose does this automatically.
 
 ## TLS
 

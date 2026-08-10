@@ -12,7 +12,8 @@ End-to-end over TLS 1.3, in one process: our WidgetService served via
 `Client.connectTls`. Proves the full path — Lean gRPC client → TLS →
 Lean gRPC server → bearer authentication (pre-body request-header
 authorizer) → refinement-type validation/authz → principal binding →
-capability-typed pg-lean repository — plus graceful listener termination.
+capability-typed lean-pgx repository over pg-lean — plus graceful listener
+termination.
 
 Env: PG_URL, ACME_TLS_CERT (DER leaf), ACME_TLS_KEY (32-byte Ed25519 seed),
 ACME_TLS_PEM (leaf PEM, the client's trust anchor).

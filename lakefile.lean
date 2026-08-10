@@ -5,8 +5,9 @@ open Lake DSL
 # lakefile.lean — IDE project model only.
 
 Bazel owns the real build and tests in this repository; Lake exists so that
-`lake serve` / editors resolve the ecosystem imports (`Grpc`, `Pg`,
-`Protovalidate.*`) from the sibling checkouts.
+`lake serve` / editors resolve the hand-authored ecosystem imports (`Grpc`,
+`Pg`, `Protovalidate.*`) from the sibling checkouts. The generated
+`AcmeDb` modules and sources that import them remain Bazel-only.
 
 Use Bazel for validation:
 

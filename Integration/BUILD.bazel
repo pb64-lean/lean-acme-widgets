@@ -1,5 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@lean-pgx//bazel:defs.bzl", "pg_live_test")
 load("@rules_lean//lean:defs.bzl", "lean_binary")
 
 # In-process TLS end-to-end: Lean gRPC client → TLS → WidgetService → pg-lean.
@@ -13,4 +14,29 @@ lean_binary(
         "@pg_lean//:pg_lean",
         "@rules_lean_grpc//:grpc_lean",
     ],
+)
+
+# Fresh-cluster acceptance for the canonical migration, generated contract,
+# attachment, descriptor checks, cardinalities, and all five CRUD runners.
+lean_binary(
+    name = "lean_pgx_live_test_bin",
+    srcs = ["LeanPgxLiveTest.lean"],
+    deps = [
+        "//db:acme_db",
+        "@pg_lean//:pg_lean",
+    ],
+)
+
+pg_live_test(
+    name = "lean_pgx_live_test",
+    database = "//db:acme_db",
+    postgres = "@postgresql_18//:toolchain",
+    runner = ":lean_pgx_live_test_bin",
+)
+
+pg_live_test(
+    name = "lean_pgx_live_test_pg17",
+    database = "//db:acme_db",
+    postgres = "@postgresql_17//:toolchain",
+    runner = ":lean_pgx_live_test_bin",
 )

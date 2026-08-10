@@ -2,7 +2,7 @@
 # End-to-end: docker-compose postgres + the Lean acme_server + grpcurl.
 # Exercises the full stack — wire decode, refinement-type validation (field
 # rules → INVALID_ARGUMENT, authz.* policies → PERMISSION_DENIED), and the
-# pg-lean-backed repository — then tears everything down.
+# lean-pgx checked repository over pg-lean — then tears everything down.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
