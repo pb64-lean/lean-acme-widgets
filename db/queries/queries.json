@@ -1,0 +1,49 @@
+{
+  "supportedServerMajors": [17, 18],
+  "insert_widget.sql": {
+    "leanName": "InsertWidget",
+    "cardinality": "exactlyOne",
+    "parameters": [
+      {"position": 1, "name": "ownerId", "nullable": false},
+      {"position": 2, "name": "name", "nullable": false},
+      {"position": 3, "name": "sku", "nullable": false},
+      {"position": 4, "name": "quantity", "nullable": false},
+      {"position": 5, "name": "description", "nullable": false}
+    ]
+  },
+  "get_widget.sql": {
+    "leanName": "GetWidget",
+    "cardinality": "zeroOrOne",
+    "parameters": [
+      {"position": 1, "name": "widgetId", "nullable": false}
+    ]
+  },
+  "list_widgets.sql": {
+    "leanName": "ListWidgets",
+    "cardinality": "many",
+    "parameters": [
+      {"position": 1, "name": "ownerId", "nullable": false},
+      {"position": 2, "name": "pageSize", "nullable": false}
+    ]
+  },
+  "update_widget.sql": {
+    "leanName": "UpdateWidget",
+    "cardinality": "zeroOrOne",
+    "parameters": [
+      {"position": 1, "name": "widgetId", "nullable": false},
+      {"position": 2, "name": "ownerId", "nullable": false},
+      {"position": 3, "name": "name", "nullable": false},
+      {"position": 4, "name": "sku", "nullable": false},
+      {"position": 5, "name": "quantity", "nullable": false},
+      {"position": 6, "name": "description", "nullable": false}
+    ]
+  },
+  "delete_widget.sql": {
+    "leanName": "DeleteWidget",
+    "cardinality": "zeroOrOne",
+    "parameters": [
+      {"position": 1, "name": "widgetId", "nullable": false},
+      {"position": 2, "name": "ownerId", "nullable": false}
+    ]
+  }
+}

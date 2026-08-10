@@ -3,8 +3,9 @@
 
 Ties together the sibling Lean ecosystem end to end — rules_lean (build),
 rules_lean_grpc (proto/gRPC codegen + runtime), protovalidate_lean (CEL
-refinement-type codegen + runtime), pg-lean (PostgreSQL client), and
-tls13-lean (TLS 1.3) — into one deployable service.
+refinement-type codegen + runtime), lean-pgx (checked PostgreSQL codegen),
+pg-lean (PostgreSQL client), and tls13-lean (TLS 1.3) — into one deployable
+service.
 
 This module is always the root of its own build; every sibling is wired with
 a local_path_override. Transitive overrides are ignored by Bzlmod when a
@@ -56,6 +57,96 @@ bazel_dep(name = "pg-lean", version = "0.1.0", repo_name = "pg_lean")
 local_path_override(
     module_name = "pg-lean",
     path = "../pg-lean",
+)
+
+# Checked PostgreSQL schema/query generation.
+bazel_dep(name = "lean-pgx", version = "0.1.0")
+local_path_override(
+    module_name = "lean-pgx",
+    path = "../lean-pgx",
+)
+
+# lean-pgx's generator macros refer to these execution-time tools from the
+# consuming root repository. Reuse lean-pgx's pinned Nix expression while
+# instantiating root-owned repositories under the names used by the macros.
+bazel_dep(name = "rules_nixpkgs_core", version = "0.13.0")
+
+lean_pgx_postgres_nix = use_extension(
+    "@rules_nixpkgs_core//extensions:repository.bzl",
+    "nix_repo",
+)
+lean_pgx_postgres_nix.file(
+    name = "postgres_nixpkgs",
+    file = "@lean-pgx//:postgres.nix",
+    file_deps = ["@lean-pgx//:postgres.json"],
+)
+use_repo(lean_pgx_postgres_nix, "postgres_nixpkgs")
+
+lean_pgx_postgres_pkg = use_extension(
+    "@rules_nixpkgs_core//extensions:package.bzl",
+    "nix_pkg",
+)
+
+_POSTGRES_BUILD = """\
+filegroup(
+    name = "toolchain",
+    srcs = glob(["bin/**", "lib/**", "share/**"]),
+    visibility = ["//visibility:public"],
+)
+"""
+
+_SOCAT_BUILD = """\
+filegroup(
+    name = "toolchain",
+    srcs = ["bin/socat", "bin/socat1"],
+    visibility = ["//visibility:public"],
+)
+"""
+
+_COREUTILS_BUILD = """\
+filegroup(
+    name = "toolchain",
+    srcs = [
+        "bin/coreutils",
+        "bin/mkdir",
+        "bin/mktemp",
+        "bin/rm",
+        "bin/sleep",
+    ],
+    visibility = ["//visibility:public"],
+)
+"""
+
+lean_pgx_postgres_pkg.attr(
+    name = "postgresql_17",
+    attr = "postgresql_17",
+    build_file_content = _POSTGRES_BUILD,
+    repo = "@postgres_nixpkgs",
+)
+lean_pgx_postgres_pkg.attr(
+    name = "postgresql_18",
+    attr = "postgresql_18",
+    build_file_content = _POSTGRES_BUILD,
+    repo = "@postgres_nixpkgs",
+)
+lean_pgx_postgres_pkg.attr(
+    name = "socat",
+    attr = "socat",
+    build_file_content = _SOCAT_BUILD,
+    repo = "@postgres_nixpkgs",
+)
+lean_pgx_postgres_pkg.attr(
+    name = "coreutils",
+    attr = "coreutils",
+    build_file_content = _COREUTILS_BUILD,
+    repo = "@postgres_nixpkgs",
+)
+use_repo(
+    lean_pgx_postgres_pkg,
+    "coreutils",
+    "postgresql_17",
+    "postgresql_18",
+    "socat",
 )
 
 # ── TLS 1.3 (used by pg-lean; also directly available) ──────────────────────

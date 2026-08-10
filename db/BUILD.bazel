@@ -1,0 +1,37 @@
+load(
+    "@lean-pgx//bazel:defs.bzl",
+    "lean_pg_library",
+    "pg_compat_test",
+    "pg_query_set",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+pg_query_set(
+    name = "queries",
+    srcs = [
+        "queries/delete_widget.sql",
+        "queries/get_widget.sql",
+        "queries/insert_widget.sql",
+        "queries/list_widgets.sql",
+        "queries/update_widget.sql",
+    ],
+    manifest = "queries/queries.json",
+)
+
+lean_pg_library(
+    name = "acme_db",
+    module_prefix = "AcmeDb",
+    migrations = ["migrations/0001_schema.sql"],
+    queries = ":queries",
+    schemas = ["public"],
+)
+
+pg_compat_test(
+    name = "acme_db_pg17_pg18_test",
+    database = ":acme_db",
+    postgres = [
+        "@postgresql_17//:toolchain",
+        "@postgresql_18//:toolchain",
+    ],
+)

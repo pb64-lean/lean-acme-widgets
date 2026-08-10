@@ -8,7 +8,8 @@ services:
     ports:
       - "54398:5432"
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db/migrations/0001_schema.sql:/docker-entrypoint-initdb.d/0001_schema.sql:ro
+      - ./db/fixtures/0001_seed.sql:/docker-entrypoint-initdb.d/0002_seed.sql:ro
 
   # TLS-only variant (scripts/acme-e2e.sh tls): serves the .certs/ leaf and
   # rejects plaintext TCP entirely (hostssl-only pg_hba), so a working service
@@ -23,7 +24,8 @@ services:
     ports:
       - "54397:5432"
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db/migrations/0001_schema.sql:/docker-entrypoint-initdb.d/0001_schema.sql:ro
+      - ./db/fixtures/0001_seed.sql:/docker-entrypoint-initdb.d/0002_seed.sql:ro
       - ./.certs:/certs:ro
     entrypoint:
       - bash
