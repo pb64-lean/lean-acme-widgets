@@ -17,13 +17,14 @@ lean_library(
 
 # Capability-typed persistence: repository functions take Authorized*
 # capabilities (validated request + authenticated principal + policy
-# propositions); checked SQL row decoding.
+# propositions), then execute lean-pgx generated checked queries.
 lean_library(
     name = "repo",
     srcs = ["Repo.lean"],
     strip_module_prefix = "lean",
     deps = [
         ":auth",
+        "//db:acme_db",
         "//proto:acme_lean",
         "//proto:acme_valid",
         "@pg_lean//:pg_lean",
@@ -68,6 +69,7 @@ lean_binary(
         ":auth",
         ":repo",
         ":service",
+        "@pg_lean//:pg_lean",
     ],
 )
 
@@ -84,6 +86,10 @@ lean_assurance_test(
         "Acme.Repo.widgetOfRow_roundtrip",
         "Acme.Repo.uint64OfInt_roundtrip",
         "Acme.Repo.uint32OfInt_roundtrip",
+        "AcmeDb.Schema.Public.Widgets.validate_sound",
+        "AcmeDb.Schema.Public.Widgets.validate_complete",
+        "AcmeDb.Queries.GetWidget.validate_sound",
+        "AcmeDb.Queries.GetWidget.validate_complete",
         "Acme.Model.create_inserts_owned",
         "Acme.Model.update_preserves_foreign",
         "Acme.Model.delete_removes_named_only",

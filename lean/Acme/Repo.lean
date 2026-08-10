@@ -1,6 +1,6 @@
 module
 
-public import Pg
+public import AcmeDb
 public import AcmeLean.widgets
 public import AcmeLean.authz
 public import AcmeValid.widgets
@@ -8,34 +8,36 @@ public import AcmeValid.authz
 public import Acme.Auth
 import all AcmeValid.widgets
 import all AcmeValid.authz
+import Pg
 
 public section
 
 namespace Acme
 namespace Repo
 
-open Pg
 open acme.v1
 
 /-!
-Widget persistence over pg-lean, behind a capability-typed boundary.
+Widget persistence through lean-pgx generated checked runners over pg-lean,
+behind a capability-typed boundary.
 
 Every mutating/reading repository function takes a per-operation
 `Authorized*` capability: a structure carrying the validated request, the
 `Auth.AuthenticatedPrincipal`, and the policy propositions — extracted from
 the generated `AcmeValid.Checked*` proofs plus the `Auth.Bound` binding
 check by the `authorize*` smart constructors below. Evidence therefore
-crosses the repository boundary intact and is erased only at SQL parameter
-serialization (`textParam`).
+crosses the repository boundary intact and is erased only when a capability
+is projected into a generated query's typed `Params` value.
 
-One `Pg.Connection` per repository; statements are prepared once at startup
-and executed by name (extended protocol, text parameters). pg-lean
-serializes operations on a connection, so the repository is safe to share
+One checked lean-pgx connection per repository. `open'` attaches the generated
+database contract to a raw `Pg.Connection`; generated runners then prepare,
+verify, encode, execute, and decode each declared query. pg-lean serializes
+operations on the underlying connection, so the repository is safe to share
 across handler tasks.
 -/
 
 structure Repo where
-  conn : Connection
+  conn : Pgx.Typed.CheckedConnection AcmeDb.database
 
 -- ── capabilities ──────────────────────────────────────────────────────────
 
@@ -202,10 +204,9 @@ theorem authorizeCreate_none {p : Auth.AuthenticatedPrincipal}
   next => simp at h
   next hb => exact hb
 
--- ── checked SQL row decoding (no silent Int.toNat collapse) ───────────────
+-- ── checked PostgreSQL/protobuf numeric conversions ──────────────────────
 
-/-- Typed decode failure for values postgres returned outside the proto
-numeric ranges (possible only if the CHECK constraints were bypassed). -/
+/-- Typed numeric conversion failure at the PostgreSQL/protobuf boundary. -/
 inductive DecodeError where
   | outOfRange (column : String) (value : Int) (target : String)
   deriving Repr
@@ -225,6 +226,27 @@ def uint64OfInt (column : String) (i : Int) : Except DecodeError UInt64 :=
 def uint32OfInt (column : String) (i : Int) : Except DecodeError UInt32 :=
   if 0 ≤ i ∧ i < (2 : Int) ^ 32 then .ok (UInt32.ofNat i.toNat)
   else .error (.outOfRange column i "uint32")
+
+/-- Checked conversion at the service/database boundary. Protobuf `uint64`
+admits values above PostgreSQL `BIGINT`; reject those values instead of using
+the wrapping `UInt64.toInt64` conversion. -/
+def int64OfUInt64 (column : String) (u : UInt64) : Except DecodeError Int64 :=
+  let value : Int := (u.toNat : Int)
+  if value ≤ Int64.maxValue.toInt then .ok (Int64.ofInt value)
+  else .error (.outOfRange column value "int64")
+
+/-- Repository failures distinguish generated database-contract/query errors
+from explicit numeric conversion failures at the protobuf/SQL boundary. -/
+inductive Error where
+  | database (error : Pgx.Typed.Error)
+  | conversion (error : DecodeError)
+  deriving Repr
+
+def Error.render : Error → String
+  | .database error => toString error
+  | .conversion error => error.render
+
+instance : ToString Error := ⟨Error.render⟩
 
 /-- Pure column-tuple → `Widget` decoder used for every row. -/
 def widgetOfRow (id ownerId : Int) (name sku : String) (quantity : Int)
@@ -251,9 +273,9 @@ theorem uint32OfInt_roundtrip (column : String) (u : UInt32) :
     if_pos (show 0 ≤ (u.toNat : Int) ∧ (u.toNat : Int) < 2 ^ 32 by omega)]
   simp [Int.toNat_natCast, UInt32.ofNat_toNat]
 
-/-- Row roundtrip: decoding exactly the column values the repository
-serializes yields exactly the widget with those fields (the six columns are
-the whole persisted state; wire-level unknown fields are never stored). -/
+/-- Protobuf-range row roundtrip: the pure unsigned decoder preserves all six
+persisted widget fields. Query parameters are narrowed separately by
+`int64OfUInt64` before crossing PostgreSQL's signed `BIGINT` boundary. -/
 theorem widgetOfRow_roundtrip (id owner : UInt64) (name sku : String)
     (quantity : UInt32) (description : String) :
     widgetOfRow (id.toNat : Int) (owner.toNat : Int) name sku
@@ -264,127 +286,106 @@ theorem widgetOfRow_roundtrip (id owner : UInt64) (name sku : String)
     except_bind_ok, except_bind_ok, except_bind_ok]
   rfl
 
--- ── SQL ───────────────────────────────────────────────────────────────────
+-- ── generated database attachment and queries ────────────────────────────
 
-def migrate (conn : Connection) : IO (Except Error Unit) := do
-  pure ((← (conn.exec "CREATE TABLE IF NOT EXISTS widgets (
-      id BIGSERIAL PRIMARY KEY CHECK (id > 0),
-      owner_id BIGINT NOT NULL CHECK (owner_id >= 0),
-      name TEXT NOT NULL,
-      sku TEXT NOT NULL,
-      quantity BIGINT NOT NULL CHECK (quantity >= 0 AND quantity < 4294967296),
-      description TEXT NOT NULL DEFAULT '')").block).map (fun _ => ()))
-
-private def prepared : Array (String × String) := #[
-  ("w_insert",
-   "INSERT INTO widgets (owner_id, name, sku, quantity, description)
-    VALUES ($1, $2, $3, $4, $5) RETURNING id"),
-  ("w_get",
-   "SELECT id, owner_id, name, sku, quantity, description FROM widgets
-    WHERE id = $1"),
-  ("w_list",
-   "SELECT id, owner_id, name, sku, quantity, description FROM widgets
-    WHERE owner_id = $1 ORDER BY id LIMIT $2"),
-  ("w_update",
-   "UPDATE widgets SET name = $3, sku = $4, quantity = $5, description = $6
-    WHERE id = $1 AND owner_id = $2 RETURNING id"),
-  ("w_delete",
-   "DELETE FROM widgets WHERE id = $1 AND owner_id = $2 RETURNING id")]
-
-def open' (conn : Connection) : IO (Except Error Repo) := do
-  if let .error e := ← migrate conn then
-    return .error e
-  for (name, sql) in prepared do
-    if let .error e := ← (conn.prepare name sql).block then
-      return .error e
-  pure (.ok { conn })
+/-- Attach the generated schema/query contract to the application's raw
+connection. Database creation and migrations are deployment concerns; this
+function never mutates the schema. -/
+def open' (conn : Pg.Connection) : IO (Except Error Repo) := do
+  match ← (AcmeDb.attach conn).block with
+  | .ok checked => pure (.ok { conn := checked })
+  | .error error => pure (.error (.database error))
 
 namespace Repo
 
-/-- Serialization boundary: this is the only place evidence is erased. -/
-private def textParam (s : String) : Option ByteArray := some s.toUTF8
+private def inputInt64 (column : String) (value : UInt64) : Except Error Int64 :=
+  (int64OfUInt64 column value).mapError .conversion
 
-private def rowToWidget (rs : Rows) (row : Nat) : Except String Widget := do
-  let id ← rs.get (α := Int) row 0
-  let ownerId ← rs.get (α := Int) row 1
-  let name ← rs.get (α := String) row 2
-  let sku ← rs.get (α := String) row 3
-  let quantity ← rs.get (α := Int) row 4
-  let description ← rs.get (α := String) row 5
-  (widgetOfRow id ownerId name sku quantity description).mapError DecodeError.render
+private def quantityInt64 (value : UInt32) : Int64 :=
+  Int64.ofInt (value.toNat : Int)
 
-private def decodeError (what e : String) : Error :=
-  .rejected (.rejectedInvalid s!"{what}: {e}")
+private def widgetFromColumns (id ownerId : Int64) (name sku : String)
+    (quantity : Int64) (description : String) : Except Error Widget :=
+  (widgetOfRow id.toInt ownerId.toInt name sku quantity.toInt description).mapError
+    .conversion
 
 /-- Insert the capability's widget; returns the database-assigned id.
 `cap.owner_eq` proves the serialized owner is the authenticated principal. -/
 def insertWidget (repo : Repo) (cap : AuthorizedCreate) : IO (Except Error UInt64) := do
   let w := cap.request.widget.toBase
-  match ← (repo.conn.execute "w_insert" #[
-      textParam (toString w.owner_id.toNat),
-      textParam w.name,
-      textParam w.sku,
-      textParam (toString w.quantity.toNat),
-      textParam w.description]).block with
-  | .error e => pure (.error e)
-  | .ok rows =>
-    match rows.get (α := Int) 0 0 with
-    | .ok id =>
-      match uint64OfInt "widgets.id" id with
-      | .ok id => pure (.ok id)
-      | .error e => pure (.error (decodeError "insert returning" e.render))
-    | .error e => pure (.error (decodeError "insert returning" e))
+  let ownerId ← match inputInt64 "widgets.owner_id" w.owner_id with
+    | .ok value => pure value
+    | .error error => return .error error
+  match ← (AcmeDb.Queries.InsertWidget.run repo.conn {
+      ownerId,
+      name := w.name,
+      sku := w.sku,
+      quantity := quantityInt64 w.quantity,
+      description := w.description
+    }).block with
+  | .error error => pure (.error (.database error))
+  | .ok row =>
+    pure <| (uint64OfInt "widgets.id" row.val.id.toInt).mapError .conversion
 
 def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Widget)) := do
-  match ← (repo.conn.execute "w_get" #[
-      textParam (toString cap.request.widget_id.val.toNat)]).block with
-  | .error e => pure (.error e)
-  | .ok rows =>
-    if rows.rows.isEmpty then
-      pure (.ok none)
-    else
-      match rowToWidget rows 0 with
-      | .ok w => pure (.ok (some w))
-      | .error e => pure (.error (decodeError "widget row" e))
+  let widgetId ← match inputInt64 "widgets.id" cap.request.widget_id.val with
+    | .ok value => pure value
+    | .error error => return .error error
+  match ← (AcmeDb.Queries.GetWidget.run repo.conn { widgetId }).block with
+  | .error error => pure (.error (.database error))
+  | .ok none => pure (.ok none)
+  | .ok (some row) =>
+    pure <| some <$> widgetFromColumns row.val.id row.val.ownerId row.val.name
+      row.val.sku row.val.quantity row.val.description
 
 /-- List the capability's user's widgets; `cap.self_or_admin` proves the
 listed owner is the authenticated principal, or the principal is admin. -/
 def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array Widget)) := do
-  match ← (repo.conn.execute "w_list" #[
-      textParam (toString cap.request.user_id.val.toNat),
-      textParam (toString cap.request.page_size.val.toNat)]).block with
-  | .error e => pure (.error e)
-  | .ok rows => Id.run do
-    let mut out := #[]
-    for i in [0:rows.rows.size] do
-      match rowToWidget rows i with
-      | .ok w => out := out.push w
-      | .error e => return pure (.error (decodeError "widget row" e))
-    return pure (.ok out)
+  let ownerId ← match inputInt64 "widgets.owner_id" cap.request.user_id.val with
+    | .ok value => pure value
+    | .error error => return .error error
+  let pageSize := quantityInt64 cap.request.page_size.val
+  match ← (AcmeDb.Queries.ListWidgets.run repo.conn { ownerId, pageSize }).block with
+  | .error error => pure (.error (.database error))
+  | .ok rows =>
+    pure <| rows.mapM fun row =>
+      widgetFromColumns row.val.id row.val.ownerId row.val.name row.val.sku
+        row.val.quantity row.val.description
 
 /-- Update by (id, owner); `false` when no such widget belongs to the owner.
 `cap.owner_eq` proves the owner in the WHERE clause is the authenticated
 principal, `cap.has_id` that the id predicate is non-degenerate. -/
 def updateWidget (repo : Repo) (cap : AuthorizedUpdate) : IO (Except Error Bool) := do
   let w := cap.request.widget.toBase
-  match ← (repo.conn.execute "w_update" #[
-      textParam (toString w.id.toNat),
-      textParam (toString w.owner_id.toNat),
-      textParam w.name,
-      textParam w.sku,
-      textParam (toString w.quantity.toNat),
-      textParam w.description]).block with
-  | .error e => pure (.error e)
-  | .ok rows => pure (.ok (rows.rows.size == 1))
+  let widgetId ← match inputInt64 "widgets.id" w.id with
+    | .ok value => pure value
+    | .error error => return .error error
+  let ownerId ← match inputInt64 "widgets.owner_id" w.owner_id with
+    | .ok value => pure value
+    | .error error => return .error error
+  match ← (AcmeDb.Queries.UpdateWidget.run repo.conn {
+      widgetId,
+      ownerId,
+      name := w.name,
+      sku := w.sku,
+      quantity := quantityInt64 w.quantity,
+      description := w.description
+    }).block with
+  | .error error => pure (.error (.database error))
+  | .ok row? => pure (.ok row?.isSome)
 
 /-- Delete by (id, owner); `false` when nothing matched. `cap.self_or_admin`
 proves the named owner is the authenticated principal, or admin override. -/
 def deleteWidget (repo : Repo) (cap : AuthorizedDelete) : IO (Except Error Bool) := do
-  match ← (repo.conn.execute "w_delete" #[
-      textParam (toString cap.request.widget_id.val.toNat),
-      textParam (toString cap.request.user_id.val.toNat)]).block with
-  | .error e => pure (.error e)
-  | .ok rows => pure (.ok (rows.rows.size == 1))
+  let widgetId ← match inputInt64 "widgets.id" cap.request.widget_id.val with
+    | .ok value => pure value
+    | .error error => return .error error
+  let ownerId ← match inputInt64 "widgets.owner_id" cap.request.user_id.val with
+    | .ok value => pure value
+    | .error error => return .error error
+  match ← (AcmeDb.Queries.DeleteWidget.run repo.conn { widgetId, ownerId }).block with
+  | .error error => pure (.error (.database error))
+  | .ok row? => pure (.ok row?.isSome)
 
 end Repo
 end Repo

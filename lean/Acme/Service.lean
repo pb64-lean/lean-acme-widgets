@@ -31,7 +31,7 @@ WidgetService, authenticated and capability-typed:
    may not act as the principal named in the request.
 3. Past that point the repository is called only with `Authorized*`
    capabilities: validated request + authenticated principal + policy
-   propositions, erased only at SQL parameter serialization.
+   propositions, projected only into generated checked query parameters.
 
 Field-rule violations map to INVALID_ARGUMENT and `authz.*` policy
 violations to PERMISSION_DENIED via the total `ruleKind` classification.
@@ -108,8 +108,8 @@ def bound (authorize : Option α) : Grpc.GrpcM α :=
   | some cap => pure cap
   | none => throw principalMismatch
 
-/-- Surface repository/postgres failures as INTERNAL. -/
-def repoM (action : IO (Except Pg.Error α)) : Grpc.GrpcM α := do
+/-- Surface repository/database-contract failures as INTERNAL. -/
+def repoM (action : IO (Except Repo.Error α)) : Grpc.GrpcM α := do
   match ← liftM action with
   | .ok v => pure v
   | .error e => throw (Grpc.Status.internal (toString e))

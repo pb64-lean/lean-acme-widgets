@@ -247,6 +247,11 @@ def main : IO Unit := do
   expect (match Acme.Repo.uint64OfInt "c" 42 with
     | .ok v => v == 42
     | .error _ => false) "in-range uint64 accepted"
+  expect (match Acme.Repo.int64OfUInt64 "c" (UInt64.ofNat (2 ^ 63 - 1)) with
+    | .ok v => v == Int64.maxValue
+    | .error _ => false) "PostgreSQL bigint maximum accepted"
+  expect (Acme.Repo.int64OfUInt64 "c" (UInt64.ofNat (2 ^ 63)) |>.isOk |> not)
+    "protobuf uint64 above PostgreSQL bigint rejected"
   match Acme.Repo.widgetOfRow 1 7 "Left-handed flange" "wgt-1024" 5 "" with
   | .error e => throw (IO.userError s!"widgetOfRow: {e}")
   | .ok w =>

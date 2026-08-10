@@ -5,9 +5,9 @@ import Grpc
 import Pg
 
 /-!
-The Acme Widgets server: PostgreSQL via pg-lean (PG_URL, default the
-docker-compose instance) + the gRPC WidgetService (port from argv, default
-50061) with reflection enabled.
+The Acme Widgets server: PostgreSQL through the generated lean-pgx contract
+over pg-lean (`PG_URL`, default the docker-compose instance) + the gRPC
+WidgetService (port from argv, default 50061) with reflection enabled.
 
 Authentication: WidgetService methods require an `authorization: Bearer
 <token>` header, resolved against a token table BEFORE any request body is
