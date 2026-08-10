@@ -37,6 +37,7 @@ pg_live_test(
 pg_live_test(
     name = "lean_pgx_live_test_pg17",
     database = "//db:acme_db",
+    major = 17,
     postgres = "@postgresql_17//:toolchain",
     runner = ":lean_pgx_live_test_bin",
 )

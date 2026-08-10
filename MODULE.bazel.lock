@@ -623,6 +623,111 @@
         ]
       }
     },
+    "@@lean-pgx+//bazel:extensions.bzl%lean_pgx_tools": {
+      "general": {
+        "bzlTransitiveDigest": "b0nWSUGB5OYmRZLezakXedlAWg/EcyFO6PF6GKDL3uU=",
+        "usagesDigest": "AKntKly7Aovnl6SRB1KPHoe+oG3W/M+Tu5ohIyZdO0Y=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "lean_pgx_postgres_nixpkgs": {
+            "repoRuleId": "@@rules_nixpkgs_core+//:nixpkgs.bzl%_nixpkgs_local_repository",
+            "attributes": {
+              "unmangled_name": "lean_pgx_postgres_nixpkgs",
+              "nix_file": "@@lean-pgx+//:postgres.nix",
+              "nix_file_deps": [
+                "@@lean-pgx+//:postgres.json"
+              ],
+              "nix_file_content": ""
+            }
+          },
+          "lean_pgx_postgresql_17": {
+            "repoRuleId": "@@rules_nixpkgs_core+//:nixpkgs.bzl%_nixpkgs_package",
+            "attributes": {
+              "unmangled_name": "lean_pgx_postgresql_17",
+              "attribute_path": "postgresql_17",
+              "nix_file_deps": {},
+              "nix_file_content": "",
+              "repository": "@@lean-pgx++lean_pgx_tools+lean_pgx_postgres_nixpkgs//:lean_pgx_postgres_nixpkgs",
+              "repositories": {},
+              "build_file_content": "filegroup(\n    name = \"toolchain\",\n    srcs = glob([\"bin/**\", \"lib/**\", \"share/**\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "nixopts": [],
+              "quiet": false,
+              "fail_not_supported": true
+            }
+          },
+          "lean_pgx_postgresql_18": {
+            "repoRuleId": "@@rules_nixpkgs_core+//:nixpkgs.bzl%_nixpkgs_package",
+            "attributes": {
+              "unmangled_name": "lean_pgx_postgresql_18",
+              "attribute_path": "postgresql_18",
+              "nix_file_deps": {},
+              "nix_file_content": "",
+              "repository": "@@lean-pgx++lean_pgx_tools+lean_pgx_postgres_nixpkgs//:lean_pgx_postgres_nixpkgs",
+              "repositories": {},
+              "build_file_content": "filegroup(\n    name = \"toolchain\",\n    srcs = glob([\"bin/**\", \"lib/**\", \"share/**\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "nixopts": [],
+              "quiet": false,
+              "fail_not_supported": true
+            }
+          },
+          "lean_pgx_socat": {
+            "repoRuleId": "@@rules_nixpkgs_core+//:nixpkgs.bzl%_nixpkgs_package",
+            "attributes": {
+              "unmangled_name": "lean_pgx_socat",
+              "attribute_path": "socat",
+              "nix_file_deps": {},
+              "nix_file_content": "",
+              "repository": "@@lean-pgx++lean_pgx_tools+lean_pgx_postgres_nixpkgs//:lean_pgx_postgres_nixpkgs",
+              "repositories": {},
+              "build_file_content": "filegroup(\n    name = \"toolchain\",\n    srcs = [\"bin/socat\", \"bin/socat1\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "nixopts": [],
+              "quiet": false,
+              "fail_not_supported": true
+            }
+          },
+          "lean_pgx_coreutils": {
+            "repoRuleId": "@@rules_nixpkgs_core+//:nixpkgs.bzl%_nixpkgs_package",
+            "attributes": {
+              "unmangled_name": "lean_pgx_coreutils",
+              "attribute_path": "coreutils",
+              "nix_file_deps": {},
+              "nix_file_content": "",
+              "repository": "@@lean-pgx++lean_pgx_tools+lean_pgx_postgres_nixpkgs//:lean_pgx_postgres_nixpkgs",
+              "repositories": {},
+              "build_file_content": "filegroup(\n    name = \"toolchain\",\n    srcs = [\n        \"bin/coreutils\",\n        \"bin/mkdir\",\n        \"bin/mktemp\",\n        \"bin/rm\",\n        \"bin/sleep\",\n    ],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "nixopts": [],
+              "quiet": false,
+              "fail_not_supported": true
+            }
+          }
+        },
+        "moduleExtensionMetadata": {
+          "explicitRootModuleDirectDeps": [
+            "lean_pgx_postgresql_17",
+            "lean_pgx_postgresql_18",
+            "lean_pgx_socat",
+            "lean_pgx_coreutils"
+          ],
+          "explicitRootModuleDirectDevDeps": [],
+          "useAllRepos": "NO",
+          "reproducible": false
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "lean-pgx+",
+            "rules_nixpkgs_core",
+            "rules_nixpkgs_core+"
+          ],
+          [
+            "rules_nixpkgs_core+",
+            "bazel_skylib",
+            "bazel_skylib+"
+          ]
+        ]
+      }
+    },
     "@@prometheus-cpp+//bazel:repositories.bzl%data_deps_ext": {
       "general": {
         "bzlTransitiveDigest": "roCaSAezKsWaOwaJAj45ZRluFHCi1VL3hKmXw3PFqqo=",
@@ -1238,7 +1343,7 @@
     "@@rules_nixpkgs_core+//extensions:package.bzl%nix_pkg": {
       "general": {
         "bzlTransitiveDigest": "2alEQC7q9PgrArc8ZeI662VmDHLGfuswqnzBJvVDnmg=",
-        "usagesDigest": "RtQjbRqOScTYfzmW9hMa8QEgsOlW00SSuYwlhpeFI4s=",
+        "usagesDigest": "mc+ckgnRV5z5VSwDFOVH5Orku/mD3b7zd2mmCGbzjBM=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1332,7 +1437,7 @@
     "@@rules_nixpkgs_core+//extensions:repository.bzl%nix_repo": {
       "general": {
         "bzlTransitiveDigest": "dTTtWNdwe7E4j77oKh1mHI1qtdxfaVSGSZa1oPf2QjU=",
-        "usagesDigest": "vWA+GjX8QmO7L05stX0iPp7gKIY0GvPGv6wB5f7Qhtg=",
+        "usagesDigest": "vRlpmSj2a6majQYx5Y5DSmVrcEZBaJHJPp4KQpwmjSs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},

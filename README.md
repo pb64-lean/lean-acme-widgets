@@ -176,3 +176,21 @@ editor/LSP project model rather than the authoritative build. Install it with
 `elan toolchain install leanprover/lean4-nightly:nightly-2026-04-25`. The
 `lean4-nightly` selector spelling is intentional because Lean4IJ maps it
 directly to Elan's on-disk nightly directory.
+
+For Lean4IJ, refresh the Bazel-generated Lean sources before starting or
+restarting the language server:
+
+```sh
+set -o pipefail
+bazel cquery 'kind(rule, //...)' \
+  --output=starlark \
+  --starlark:expr='str(target.label) if [key for key in providers(target) if key.endswith("//lean:providers.bzl%LeanGeneratedSourceInfo")] else ""' |
+  sed '/^$/d' |
+  sort -u |
+  xargs -r bazel build --output_groups=lean_srcs
+```
+
+The Lake project recompiles `AcmeDb`, `AcmeLean`, and `AcmeValid` from those
+generated sources into `.lake/build/lib/lean`, alongside the sibling Lake
+dependencies. Re-run the target whenever the database schema, SQL queries,
+protos, or validation rules change, then restart the Lean language server.
