@@ -169,5 +169,10 @@ does not run DDL: deployment must apply `db/migrations/0001_schema.sql` before
 
 ## Toolchain
 
-Bazel builds with the shared pinned nix Lean (4.31-pre); `lakefile.lean` is
-editor-LSP only.
+Bazel builds with the shared Nix Lean 4.31-pre pinned at upstream commit
+`24bef91f9a20a45f074729e869461d374687de1c`. Lake and Lean-aware editors use
+`nightly-2026-04-25`, built from that same commit; `lakefile.lean` remains an
+editor/LSP project model rather than the authoritative build. Install it with
+`elan toolchain install leanprover/lean4-nightly:nightly-2026-04-25`. The
+`lean4-nightly` selector spelling is intentional because Lean4IJ maps it
+directly to Elan's on-disk nightly directory.

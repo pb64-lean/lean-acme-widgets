@@ -19,6 +19,7 @@ package «lean-acme-widgets» where
 
 require «pg-lean» from "../pg-lean"
 require «rules-lean-grpc» from "../grpc-lean"
+require «protovalidate-lean» from "../protovalidate-lean"
 
 lean_lib «Acme» where
   srcDir := "lean"
