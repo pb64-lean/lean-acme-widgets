@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 MODE="${1:-plain}"          # plain | tls (postgres over TLS, verify-full)
-PORT="${ACME_PORT:-50061}"
+PORT="${ACME_LISTEN_PORT:-50061}"
 ADDR="localhost:${PORT}"
 SERVER_PID=""
 FAILS=0
@@ -55,7 +55,7 @@ hostssl all all ::0/0     trust
 HBA
   PG_SERVICE="postgres-tls"
   COMPOSE=(docker compose --profile tls)
-  export PG_URL="postgres://acme@localhost:54397/acme?sslmode=verify-full&sslrootcert=${PWD}/.certs/root.crt"
+  export ACME_DATABASE_URL="postgres://acme@localhost:54397/acme?sslmode=verify-full&sslrootcert=${PWD}/.certs/root.crt"
 fi
 
 "${COMPOSE[@]}" up -d "$PG_SERVICE" >/dev/null
@@ -67,7 +67,7 @@ done
 
 CTL_FIFO="$(mktemp -u /tmp/acme-ctl.XXXXXX)"
 mkfifo "$CTL_FIFO"
-bazel-bin/lean/Acme/acme_server "$PORT" < "$CTL_FIFO" &
+ACME_LISTEN_PORT="$PORT" bazel-bin/lean/Acme/acme_server < "$CTL_FIFO" &
 SERVER_PID=$!
 exec 9>"$CTL_FIFO"   # hold the write end open so the server's stdin stays live
 

@@ -55,7 +55,7 @@ authenticated id` and `editor : role_level ≥ 2`; see
 parameters.
 
 The trusted boundary includes the token table itself (configuration:
-`ACME_AUTH_TOKENS=token:id:role_level,...`, or a built-in demo table) and
+`ACME_BEARER_TOKENS=token:id:role_level,...`, or a built-in demo table) and
 transport confidentiality for tokens (serve TLS in production). The public
 protocol includes the wire `Principal`; removing it and generating checked
 products over only the server-side principal is outside the compatibility
@@ -118,6 +118,18 @@ scripts/acme-e2e.sh tls          # ... with the pg-lean → postgres link over T
 scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
 
+`acme_server` derives one `AcmeConfig` from the `ACME_` environment prefix:
+
+| Variable | Type/default | Purpose |
+| --- | --- | --- |
+| `ACME_DATABASE_URL` | string; `postgres://acme@localhost:54398/acme` | PostgreSQL connection URI |
+| `ACME_LISTEN_PORT` | checked `UInt16`; `50061` | gRPC listener port |
+| `ACME_BEARER_TOKENS` | optional `token:id:role_level,...` | Authentication table; absent uses the demo table |
+| `ACME_TLS_CERTIFICATE` | optional file path | DER leaf certificate |
+| `ACME_TLS_SIGNING_KEY` | optional file path | 32-byte Ed25519 signing key |
+
+The TLS certificate and signing key must either both be set or both be absent.
+
 `scripts/acme-e2e.sh` drives the running server with `grpcurl` (every call
 carries `-H "authorization: Bearer <token>"` against the demo token table),
 covering: authentication negatives (missing token → `UNAUTHENTICATED` before
@@ -143,8 +155,9 @@ does not run DDL: deployment must apply `db/migrations/0001_schema.sql` before
 
 - **Service → postgres**: pg-lean connects with the standard `sslmode`/
   `sslrootcert` options; `scripts/acme-e2e.sh tls` exercises `verify-full`.
-- **gRPC listener**: set `ACME_TLS_CERT` (DER leaf) + `ACME_TLS_KEY` (32-byte
-  Ed25519 seed) and `acme_server` terminates TLS 1.3 (ALPN "h2") via
+- **gRPC listener**: set `ACME_TLS_CERTIFICATE` (DER leaf) +
+  `ACME_TLS_SIGNING_KEY` (32-byte Ed25519 seed) and `acme_server` terminates
+  TLS 1.3 (ALPN "h2") via
   grpc-lean's `serveTls`. `scripts/acme-grpc-tls.sh` verifies it in-process:
   the **Lean** gRPC client (`Client.connectTls`, trusting the leaf PEM) calls
   the WidgetService over TLS and gets an authenticated create, a pre-body

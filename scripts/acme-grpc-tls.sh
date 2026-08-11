@@ -31,8 +31,8 @@ for _ in $(seq 1 120); do
 done
 docker compose exec postgres pg_isready -h 127.0.0.1 -U acme >/dev/null
 
-PG_URL="postgres://acme@localhost:54398/acme" \
-  ACME_TLS_CERT="${PWD}/.certs/grpc.der" \
-  ACME_TLS_KEY="${PWD}/.certs/grpc.seed" \
+ACME_DATABASE_URL="postgres://acme@localhost:54398/acme" \
+  ACME_TLS_CERTIFICATE="${PWD}/.certs/grpc.der" \
+  ACME_TLS_SIGNING_KEY="${PWD}/.certs/grpc.seed" \
   ACME_TLS_PEM="${PWD}/.certs/grpc.crt.pem" \
   bazel-bin/Integration/grpc_tls_test

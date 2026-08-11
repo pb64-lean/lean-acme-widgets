@@ -74,7 +74,7 @@ def TokenTable.ofEntries (entries : Array TokenEntry) : Except String TokenTable
   pure ⟨out⟩
 
 /-- Parse a `token:id:role_level[,token:id:role_level...]` spec (the
-`ACME_AUTH_TOKENS` environment format). Tokens may not contain `:` or `,`. -/
+`ACME_BEARER_TOKENS` environment format). Tokens may not contain `:` or `,`. -/
 def TokenTable.parse (spec : String) : Except String TokenTable := do
   let mut entries : Array TokenEntry := #[]
   for part in spec.splitOn "," do

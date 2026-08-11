@@ -15,8 +15,8 @@ authorizer) → refinement-type validation/authz → principal binding →
 capability-typed lean-pgx repository over pg-lean — plus graceful listener
 termination.
 
-Env: PG_URL, ACME_TLS_CERT (DER leaf), ACME_TLS_KEY (32-byte Ed25519 seed),
-ACME_TLS_PEM (leaf PEM, the client's trust anchor).
+Env: ACME_DATABASE_URL, ACME_TLS_CERTIFICATE (DER leaf), ACME_TLS_SIGNING_KEY
+(32-byte Ed25519 seed), ACME_TLS_PEM (leaf PEM, the client's trust anchor).
 -/
 
 open acme.v1
@@ -44,14 +44,15 @@ def checkedCreate (p : Principal) (userId : UInt64) : CheckedCreateWidgetRequest
     request := some { user_id := userId, widget := some (widget userId) } }
 
 def main : IO Unit := do
-  let pgUrl := (← IO.getEnv "PG_URL").getD "postgres://acme@localhost:54398/acme"
+  let pgUrl := (← IO.getEnv "ACME_DATABASE_URL").getD
+    "postgres://acme@localhost:54398/acme"
   let conn ← (Pg.connectUri pgUrl).block
   let repo ← match ← Acme.Repo.open' conn with
     | .ok repo => pure repo
     | .error e => throw (IO.userError s!"repo: {e}")
 
-  let certDer ← IO.FS.readBinFile (← env! "ACME_TLS_CERT")
-  let signingKey ← IO.FS.readBinFile (← env! "ACME_TLS_KEY")
+  let certDer ← IO.FS.readBinFile (← env! "ACME_TLS_CERTIFICATE")
+  let signingKey ← IO.FS.readBinFile (← env! "ACME_TLS_SIGNING_KEY")
   let certPem ← IO.FS.readFile (← env! "ACME_TLS_PEM")
 
   let server ← Grpc.Server.serveTls (Acme.Service.registry repo Acme.Auth.demoTable)
