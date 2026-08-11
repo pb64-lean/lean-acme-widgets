@@ -3,3 +3,8 @@
 # Sources live under lean/ (see lean/BUILD.bazel); protos, generated
 # libraries, and service binaries get their own packages as the system grows.
 package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "docker-compose.yml",
+    "requirements-load.txt",
+])

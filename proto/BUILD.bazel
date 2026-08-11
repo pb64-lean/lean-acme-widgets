@@ -1,8 +1,10 @@
-package(default_visibility = ["//visibility:public"])
-
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
+load("@protobuf//bazel:py_proto_library.bzl", "py_proto_library")
 load("@protovalidate_lean//protovalidate:defs.bzl", "lean_protovalidate_library")
+load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+
+package(default_visibility = ["//visibility:public"])
 
 proto_library(
     name = "acme_proto",
@@ -14,6 +16,46 @@ proto_library(
     ],
     deps = [
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
+    ],
+)
+
+# Python messages and generated WidgetService client stub used by the load
+# binary. Both are deliberately built from the same proto sources as Lean.
+py_proto_library(
+    name = "acme_py_pb2",
+    deps = [":acme_proto"],
+)
+
+py_binary(
+    name = "grpc_python_codegen",
+    srcs = ["grpc_python_codegen.py"],
+    main = "grpc_python_codegen.py",
+    deps = ["@acme_pip//grpcio_tools"],
+)
+
+genrule(
+    name = "acme_py_pb2_grpc_src",
+    srcs = [
+        ":acme_proto",
+        "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
+    ],
+    outs = ["service_pb2_grpc.py"],
+    cmd = """
+set -eu
+$(location :grpc_python_codegen) \
+  --descriptor_set_in="$(location :acme_proto):$(location @protovalidate//proto/protovalidate/buf/validate:validate_proto)" \
+  --grpc_python_out="$(GENDIR)" \
+  proto/service.proto
+""",
+    tools = [":grpc_python_codegen"],
+)
+
+py_library(
+    name = "acme_py_pb2_grpc",
+    srcs = [":acme_py_pb2_grpc_src"],
+    deps = [
+        ":acme_py_pb2",
+        "@acme_pip//grpcio",
     ],
 )
 

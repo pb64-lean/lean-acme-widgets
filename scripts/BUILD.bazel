@@ -1,0 +1,21 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+py_binary(
+    name = "acme_load",
+    srcs = ["acme_load.py"],
+    data = [
+        "//:docker-compose.yml",
+        "//db:fixtures/0001_seed.sql",
+        "//db:migrations/0001_schema.sql",
+        "//lean/Acme:acme_server",
+    ],
+    main = "acme_load.py",
+    deps = [
+        "//proto:acme_py_pb2",
+        "//proto:acme_py_pb2_grpc",
+        "@acme_pip//grpcio",
+        "@rules_python//python/runfiles",
+    ],
+)

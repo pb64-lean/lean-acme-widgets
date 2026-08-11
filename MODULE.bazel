@@ -162,6 +162,21 @@ bazel_dep(name = "protobuf", version = "33.4")
 bazel_dep(name = "protovalidate", version = "1.2.2")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
+# Python load client. rules_python supplies a hermetic interpreter plus pinned
+# wheels for both stub generation and the async gRPC runtime.
+bazel_dep(name = "rules_python", version = "1.6.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.12")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "acme_pip",
+    python_version = "3.12",
+    requirements_lock = "//:requirements-load.txt",
+)
+use_repo(pip, "acme_pip")
+
 # ── Lean toolchain (dev-only: not forced on consumers) ──────────────────────
 # Reuses the pinned nixpkgs + lean overlay from grpc_lean_protobuf, matching
 # every sibling workspace.

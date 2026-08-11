@@ -7,6 +7,11 @@ load(
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files([
+    "fixtures/0001_seed.sql",
+    "migrations/0001_schema.sql",
+])
+
 pg_query_set(
     name = "queries",
     srcs = [

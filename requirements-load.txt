@@ -1,0 +1,5 @@
+# Exact Python build/runtime inputs for the Bazel load client.
+grpcio==1.74.0
+grpcio-tools==1.74.0
+protobuf==6.31.1
+setuptools==80.9.0
