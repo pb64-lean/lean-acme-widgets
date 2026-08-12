@@ -3,6 +3,13 @@
  "packages":
  [{"type": "path",
    "scope": "",
+   "name": "lentil",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../lentil",
+   "configFile": "lakefile.lean"},
+  {"type": "path",
+   "scope": "",
    "name": "«protovalidate-lean»",
    "manifestFile": "lake-manifest.json",
    "inherited": false,

@@ -1,7 +1,7 @@
 import Acme.Auth
 import Acme.Repo
 import Acme.Service
-import Config.Config
+import Lentil
 import Grpc
 import Pg
 
@@ -9,6 +9,13 @@ import Pg
 The Acme Widgets server: PostgreSQL through the generated lean-pgx contract
 over pg-lean (`ACME_DATABASE_URL`, default the docker-compose instance) + the
 gRPC WidgetService (`ACME_LISTEN_PORT`, default 50061) with reflection enabled.
+
+Composition is Lentil beans: `@[lentil_config]` loads `AcmeConfig` from the
+`ACME_` environment prefix, `@[lentil]` recipes build the connection,
+repository, token table, and registry, and `make_context` checks the graph at
+elaboration time and generates `AcmeContext.build`. Beans construct in
+registration order (dependencies first), so the TLS invariant below is
+validated before postgres is dialed.
 
 Authentication: WidgetService methods require an `authorization: Bearer
 <token>` header, resolved against a token table BEFORE any request body is
@@ -25,7 +32,7 @@ Graceful listener termination: a line on stdin (or EOF) triggers
 `Grpc.Server.shutdown`, after which `wait` drains in-flight RPCs and returns.
 -/
 
-open EnvConfig
+open Lentil EnvConfig
 
 def defaultDatabaseUrl : String := "postgres://acme@localhost:54398/acme"
 
@@ -43,15 +50,13 @@ instance : EnvValue Acme.Auth.TokenTable where
   parse := Acme.Auth.TokenTable.parse
 
 /-- All process-level Acme settings. Field names derive the `ACME_*` keys. -/
+@[lentil_config "ACME_"]
 structure AcmeConfig where
   databaseUrl : String := defaultDatabaseUrl
   listenPort : UInt16 := 50061
   bearerTokens : Option Acme.Auth.TokenTable
   tlsCertificate : Option System.FilePath
   tlsSigningKey : Option System.FilePath
-  deriving FromEnv
-
-instance : EnvPrefix AcmeConfig := ⟨"ACME_"⟩
 
 /-- Validate the cross-field TLS invariant before any startup side effects. -/
 def AcmeConfig.tlsFiles (cfg : AcmeConfig) :
@@ -64,6 +69,45 @@ def AcmeConfig.tlsFiles (cfg : AcmeConfig) :
   | none, some _ =>
     .errors #["ACME_TLS_CERTIFICATE: must be set when ACME_TLS_SIGNING_KEY is set"]
 
+/-- The TLS listener material once the pair invariant holds: both files, or
+plaintext. `deriving FromEnv` cannot express cross-field validation, so this
+is a bean derived from `AcmeConfig` rather than part of it. -/
+structure TlsFiles where
+  files : Option (System.FilePath × System.FilePath)
+
+@[lentil] def tlsFiles (cfg : AcmeConfig) : IO TlsFiles :=
+  TlsFiles.mk <$> cfg.tlsFiles.toIO
+
+@[lentil] def connection (cfg : AcmeConfig) : IO Pg.Connection := do
+  let conn ← (Pg.connectUri cfg.databaseUrl).block
+  IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
+  pure conn
+
+@[lentil] def repository (conn : Pg.Connection) : IO Acme.Repo.Repo := do
+  match ← Acme.Repo.open' conn with
+  | .ok repo => pure repo
+  | .error e => throw (IO.userError s!"repository init: {e}")
+
+/-- The effective bearer-token table: configured, or the built-in demo one. -/
+@[lentil] def tokenTable (cfg : AcmeConfig) : IO Acme.Auth.TokenTable := do
+  match cfg.bearerTokens with
+  | some table =>
+    IO.println "auth: bearer-token table from ACME_BEARER_TOKENS"
+    pure table
+  | none =>
+    IO.println "auth: built-in demo bearer-token table"
+    pure Acme.Auth.demoTable
+
+@[lentil] def registry (repo : Acme.Repo.Repo) (table : Acme.Auth.TokenTable) :
+    Grpc.Registry :=
+  Acme.Service.registry repo table
+
+@[lentil] def serverConfig (cfg : AcmeConfig) : Grpc.Server.Config :=
+  { address := Grpc.Server.anyIPv4 cfg.listenPort }
+
+validate_beans
+make_context AcmeContext
+
 /-- Wait for a shutdown trigger (a stdin line or EOF), then stop the listener
 and drain. Runs in its own task so the main thread can `wait`. -/
 def shutdownOnStdin (server : Grpc.Server.Instance) : IO Unit := do
@@ -73,34 +117,17 @@ def shutdownOnStdin (server : Grpc.Server.Instance) : IO Unit := do
   Grpc.Server.shutdown server
 
 def main : IO Unit := do
-  let cfg ← loadConfig AcmeConfig
-  let tlsFiles ← cfg.tlsFiles.toIO
-  let conn ← (Pg.connectUri cfg.databaseUrl).block
-  let repo ← match ← Acme.Repo.open' conn with
-    | .ok repo => pure repo
-    | .error e => throw (IO.userError s!"repository init: {e}")
-  IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
-  let table ← match cfg.bearerTokens with
-    | some table =>
-      IO.println "auth: bearer-token table from ACME_BEARER_TOKENS"
-      pure table
-    | none =>
-      IO.println "auth: built-in demo bearer-token table"
-      pure Acme.Auth.demoTable
-  let registry := Acme.Service.registry repo table
-  let serverConfig : Grpc.Server.Config := { address := Grpc.Server.anyIPv4 cfg.listenPort }
-
-  let server ← match tlsFiles with
+  let context ← AcmeContext.build
+  let server ← match context.tlsFiles.files with
     | some (certificatePath, signingKeyPath) =>
       let certDer ← IO.FS.readBinFile certificatePath
       let signingKey ← IO.FS.readBinFile signingKeyPath
       IO.println "transport: TLS 1.3 (ALPN h2)"
-      Grpc.Server.serveTls registry
-        { certificateChain := #[certDer], signingKey } serverConfig
+      Grpc.Server.serveTls context.registry
+        { certificateChain := #[certDer], signingKey } context.serverConfig
     | none =>
       IO.println "transport: plaintext h2c"
-      Grpc.Server.serve registry serverConfig
-
+      Grpc.Server.serve context.registry context.serverConfig
   IO.println s!"acme-widgets listening on {server.localAddress}"
   (← IO.getStdout).flush
   let shutdownTask ← IO.asTask (shutdownOnStdin server)

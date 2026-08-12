@@ -4,13 +4,15 @@
 Ties together the sibling Lean ecosystem end to end — rules_lean (build),
 rules_lean_grpc (proto/gRPC codegen + runtime), protovalidate_lean (CEL
 refinement-type codegen + runtime), lean-pgx (checked PostgreSQL codegen),
-pg-lean (PostgreSQL client), and tls13-lean (TLS 1.3) — into one deployable
+pg-lean (PostgreSQL client), tls13-lean (TLS 1.3), and lentil
+(dependency injection + environment configuration) — into one deployable
 service.
 
-This module is always the root of its own build; every sibling is wired with
-a local_path_override. Transitive overrides are ignored by Bzlmod when a
-module is not root, so ALL local modules in the dependency graph are
-re-declared here.
+This module is always the root of its own build; every sibling under active
+co-development is wired with a local_path_override, while lentil is consumed
+remotely from a pinned GitHub commit. Transitive overrides are ignored by
+Bzlmod when a module is not root, so ALL local modules in the dependency
+graph are re-declared here.
 """
 
 module(
@@ -24,6 +26,21 @@ bazel_dep(name = "rules_lean", version = "0.1.0")
 local_path_override(
     module_name = "rules_lean",
     path = "../rules_lean",
+)
+
+# ── dependency injection + environment configuration ────────────────────────
+# Consumed remotely (no sibling checkout required): pinned to a lentil main
+# commit until registry releases are published. Lentil's own rules_lean
+# archive_override is ignored here (non-root); the local_path_override above
+# satisfies its rules_lean dependency.
+bazel_dep(name = "lentil", version = "0.1.0")
+archive_override(
+    module_name = "lentil",
+    integrity = "sha256-dIYfVO4PmZDje/DBO0LGmoNWeYSBYLvRQo9wCE2aR+U=",
+    strip_prefix = "lentil-de9954971fcd29022b4a906d96b8a52fd9cf43d7",
+    urls = [
+        "https://github.com/pb64-lean/lentil/archive/de9954971fcd29022b4a906d96b8a52fd9cf43d7.tar.gz",
+    ],
 )
 
 # ── proto/gRPC codegen rules and pure-Lean gRPC runtime ─────────────────────

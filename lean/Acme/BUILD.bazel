@@ -69,7 +69,7 @@ lean_binary(
         ":auth",
         ":repo",
         ":service",
-        "//lean/Config:config",
+        "@lentil//:lentil",
         "@pg_lean//:pg_lean",
     ],
 )

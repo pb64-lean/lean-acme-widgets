@@ -146,9 +146,10 @@ class ManagedStack:
             raise RuntimeError("PostgreSQL did not become ready")
 
         environment = os.environ.copy()
-        environment.setdefault("PG_URL", "postgres://acme@localhost:54398/acme")
+        environment.setdefault("ACME_DATABASE_URL", "postgres://acme@localhost:54398/acme")
+        environment["ACME_LISTEN_PORT"] = str(self.port)
         self.server = subprocess.Popen(
-            [str(self.server_binary), str(self.port)],
+            [str(self.server_binary)],
             stdin=subprocess.PIPE,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,

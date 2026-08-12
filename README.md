@@ -13,6 +13,9 @@ Widgets** service, tying the sibling repositories together end to end —
 - `lean-pgx` — DDL/query analysis, generated checked records and runners,
   runtime schema attachment, and relational contract metadata
 - `pg-lean` — PostgreSQL wire/TLS transport beneath lean-pgx
+- `lentil` — compile-time dependency injection and environment-backed
+  configuration (consumed remotely from a pinned commit, not a sibling
+  checkout)
 
 The service enforces **authorization by construction**. Each RPC request is a
 `(Principal, request)` product whose message-level CEL rules *are* the
@@ -91,10 +94,13 @@ contract because it changes the protobuf API.
 
 ## Getting the source
 
-All seven ecosystem repositories must be checked out side by side —
-`MODULE.bazel` wires every sibling via Bzlmod `local_path_override`, and
-because transitive overrides are ignored for non-root modules, this root
-workspace re-declares all of them:
+The seven co-developed ecosystem repositories must be checked out side by
+side — `MODULE.bazel` wires every sibling via Bzlmod `local_path_override`,
+and because transitive overrides are ignored for non-root modules, this root
+workspace re-declares all of them. `lentil` is the exception: Bazel fetches
+it remotely via `archive_override` from a pinned GitHub commit, so a sibling
+checkout is only needed for the Lake/editor project model (`lakefile.lean`
+requires `../lentil`):
 
 ```sh
 for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lean-acme-widgets; do
@@ -119,7 +125,12 @@ scripts/acme-e2e.sh tls          # ... with the pg-lean → postgres link over T
 scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
 
-`acme_server` derives one `AcmeConfig` from the `ACME_` environment prefix:
+`acme_server` composes its process with
+[lentil](https://github.com/pb64-lean/lentil): `@[lentil_config "ACME_"]`
+derives one `AcmeConfig` from the `ACME_` environment prefix, `@[lentil]`
+recipes build the postgres connection, repository, bearer-token table, and
+gRPC registry from it, and `make_context AcmeContext` checks that dependency
+graph during elaboration and generates the startup code:
 
 | Variable | Type/default | Purpose |
 | --- | --- | --- |
