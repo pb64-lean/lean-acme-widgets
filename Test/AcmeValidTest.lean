@@ -288,4 +288,50 @@ def main : IO Unit := do
   expect (Acme.Repo.widgetOfRow 1 (-7) "n" "s" 5 "" |>.isOk |> not)
     "negative owner_id rejected"
 
+  -- Generated query rows carry the SQL CHECK proofs needed by the hot-path
+  -- mappers. Boundary values are projected exactly, without a second
+  -- `Int` range decision in the repository.
+  let getRowData : AcmeDb.Queries.GetWidget.RowData :=
+    { id := Int64.maxValue
+      ownerId := Int64.maxValue
+      name := "Get boundary"
+      sku := "wgt-9223372036854775807"
+      quantity := 4294967295
+      description := "proof-projected" }
+  match AcmeDb.Queries.GetWidget.validate getRowData with
+  | .error e => throw (IO.userError s!"valid GetWidget row rejected: {e}")
+  | .ok row =>
+    let w := Acme.Repo.Repo.widgetFromGetRow row
+    expect (w.id == 9223372036854775807) "GetWidget id projection"
+    expect (w.owner_id == 9223372036854775807) "GetWidget owner projection"
+    expect (w.quantity == 4294967295) "GetWidget quantity projection"
+    expect (w.name == getRowData.name && w.sku == getRowData.sku &&
+      w.description == getRowData.description) "GetWidget text projection"
+  expect (AcmeDb.Queries.GetWidget.validate { getRowData with id := 0 } |>.isOk |> not)
+    "GetWidget zero id rejected before mapping"
+  expect (AcmeDb.Queries.GetWidget.validate { getRowData with ownerId := -1 } |>.isOk |> not)
+    "GetWidget negative owner rejected before mapping"
+  expect (AcmeDb.Queries.GetWidget.validate
+      { getRowData with quantity := 4294967296 } |>.isOk |> not)
+    "GetWidget overflowing quantity rejected before mapping"
+
+  let listRowData : AcmeDb.Queries.ListWidgets.RowData :=
+    { id := 41
+      ownerId := 7
+      name := "List row"
+      sku := "wgt-0041"
+      quantity := 0
+      description := "proof-projected" }
+  match AcmeDb.Queries.ListWidgets.validate listRowData with
+  | .error e => throw (IO.userError s!"valid ListWidgets row rejected: {e}")
+  | .ok row =>
+    let w := Acme.Repo.Repo.widgetFromListRow row
+    expect (w.id == 41 && w.owner_id == 7 && w.quantity == 0)
+      "ListWidgets numeric projection"
+    expect (w.name == listRowData.name && w.sku == listRowData.sku &&
+      w.description == listRowData.description) "ListWidgets text projection"
+  expect (AcmeDb.Queries.ListWidgets.validate
+      { listRowData with quantity := -1 } |>.isOk |> not)
+    "ListWidgets negative quantity rejected before mapping"
+
   IO.println "all acme validation, authorization, and authentication assertions passed"

@@ -248,7 +248,9 @@ def Error.render : Error → String
 
 instance : ToString Error := ⟨Error.render⟩
 
-/-- Pure column-tuple → `Widget` decoder used for every row. -/
+/-- Generic pure column-tuple → `Widget` decoder for non-proof-bearing
+callers and roundtrip assurance. Generated Get/List rows use their
+query-specific proof projections below. -/
 def widgetOfRow (id ownerId : Int) (name sku : String) (quantity : Int)
     (description : String) : Except DecodeError Widget := do
   let id ← uint64OfInt "widgets.id" id
@@ -304,10 +306,26 @@ private def inputInt64 (column : String) (value : UInt64) : Except Error Int64 :
 private def quantityInt64 (value : UInt32) : Int64 :=
   Int64.ofInt (value.toNat : Int)
 
-private def widgetFromColumns (id ownerId : Int64) (name sku : String)
-    (quantity : Int64) (description : String) : Except Error Widget :=
-  (widgetOfRow id.toInt ownerId.toInt name sku quantity.toInt description).mapError
-    .conversion
+/-- Project a validated `GetWidget` row into protobuf form. The generated row
+proof discharges every result-side numeric range obligation, so this mapper
+contains no repeated range decisions. -/
+@[inline] def widgetFromGetRow (row : AcmeDb.Queries.GetWidget.Row) : Widget :=
+  { id := AcmeDb.Queries.GetWidget.idUInt64 row
+    owner_id := AcmeDb.Queries.GetWidget.ownerIdUInt64 row
+    name := row.val.name
+    sku := row.val.sku
+    quantity := AcmeDb.Queries.GetWidget.quantityUInt32 row
+    description := row.val.description }
+
+/-- Project a validated `ListWidgets` row into protobuf form. This deliberately
+uses the list query's own proof accessors rather than widening back to `Int`. -/
+@[inline] def widgetFromListRow (row : AcmeDb.Queries.ListWidgets.Row) : Widget :=
+  { id := AcmeDb.Queries.ListWidgets.idUInt64 row
+    owner_id := AcmeDb.Queries.ListWidgets.ownerIdUInt64 row
+    name := row.val.name
+    sku := row.val.sku
+    quantity := AcmeDb.Queries.ListWidgets.quantityUInt32 row
+    description := row.val.description }
 
 /-- Insert the capability's widget; returns the database-assigned id.
 `cap.owner_eq` proves the serialized owner is the authenticated principal. -/
@@ -334,9 +352,7 @@ def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Wid
   match ← (AcmeDb.Queries.GetWidget.run repo.conn { widgetId }).block with
   | .error error => pure (.error (.database error))
   | .ok none => pure (.ok none)
-  | .ok (some row) =>
-    pure <| some <$> widgetFromColumns row.val.id row.val.ownerId row.val.name
-      row.val.sku row.val.quantity row.val.description
+  | .ok (some row) => pure (.ok (some (widgetFromGetRow row)))
 
 /-- List the capability's user's widgets; `cap.self_or_admin` proves the
 listed owner is the authenticated principal, or the principal is admin. -/
@@ -347,10 +363,7 @@ def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array W
   let pageSize := quantityInt64 cap.request.page_size.val
   match ← (AcmeDb.Queries.ListWidgets.run repo.conn { ownerId, pageSize }).block with
   | .error error => pure (.error (.database error))
-  | .ok rows =>
-    pure <| rows.mapM fun row =>
-      widgetFromColumns row.val.id row.val.ownerId row.val.name row.val.sku
-        row.val.quantity row.val.description
+  | .ok rows => pure (.ok (rows.map widgetFromListRow))
 
 /-- Update by (id, owner); `false` when no such widget belongs to the owner.
 `cap.owner_eq` proves the owner in the WHERE clause is the authenticated

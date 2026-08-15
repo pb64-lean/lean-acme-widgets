@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_lean//lean:defs.bzl", "lean_test")
+load("@rules_lean//lean:defs.bzl", "lean_binary", "lean_test")
 
 lean_test(
     name = "smoke_test",
@@ -18,4 +18,14 @@ lean_test(
         "//proto:acme_valid",
         "@rules_lean_grpc//:grpc_lean",
     ],
+)
+
+# Focused, opt-in page mapping benchmark. The row is validated once, outside
+# the timed loop, then the proof-directed projection is compared with the
+# former checked-Int mapping at page sizes 10 and 100.
+lean_binary(
+    name = "repo_mapping_benchmark",
+    srcs = ["RepoMappingBenchmark.lean"],
+    tags = ["manual"],
+    deps = ["//lean/Acme:repo"],
 )
