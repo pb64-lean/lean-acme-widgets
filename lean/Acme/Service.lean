@@ -196,27 +196,28 @@ still unread. Non-WidgetService methods (server reflection, needed by
 `grpcurl` for discovery) stay open with their registered handlers.
 -/
 def authorizer (repo : Repo.Repo) (table : Auth.TokenTable) :
-    Grpc.RequestHeaderAuthorizer :=
+    Grpc.PureRequestHeaderAuthorizer :=
   let dispatches := table.bind fun principal =>
     WidgetService.register Grpc.Registry.empty (widgetService repo principal)
-  fun entry metadata => do
+  fun entry metadata =>
     if entry.name.service != widgetServiceName then
-      pure (.acceptRegistered entry)
+      .acceptRegistered entry
     else
       match dispatches.authenticate metadata with
-      | .error status => throw status
+      | .error status => .reject status
       | .ok dispatch =>
         match dispatch.findEntry? entry.name with
-        | none => throw (Grpc.Status.internal "method missing from authenticated registry")
+        | none => .reject (Grpc.Status.internal
+            "method missing from authenticated registry")
         | some entry' =>
           match entry'.handlerFor? entry.shape with
-          | some handler => pure (.accept handler)
-          | none => throw (Grpc.Status.internal "authorizer shape mismatch")
+          | some handler => .accept handler
+          | none => .reject (Grpc.Status.internal "authorizer shape mismatch")
 
 def registry (repo : Repo.Repo) (table : Auth.TokenTable) : Grpc.Registry :=
   Grpc.Services.Reflection.register
     (WidgetService.register Grpc.Registry.empty unauthenticatedService)
-    |>.withRequestHeaderAuthorizer (authorizer repo table)
+    |>.withPureRequestHeaderAuthorizer (authorizer repo table)
 
 end Service
 end Acme
