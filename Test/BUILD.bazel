@@ -30,10 +30,10 @@ lean_binary(
     deps = ["//lean/Acme:repo"],
 )
 
-# Opt-in baseline for the row-owned PostgreSQL result-span experiment. It
-# starts after framing, exercises production Backend DataRow decoding, grows
-# the production result-array shape, and invokes ListWidgets' generated
-# prepared decoder over fixed mixed-format and control batches.
+# Opt-in comparison harness for row-owned PostgreSQL result spans. It starts
+# after framing, exercises production span decoding, grows the production
+# result-array shape, and invokes ListWidgets' generated prepared decoder over
+# fixed mixed-format and control batches.
 lean_binary(
     name = "row_owned_span_benchmark",
     srcs = ["RowOwnedSpanBenchmark.lean"],

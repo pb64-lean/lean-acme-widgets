@@ -6,14 +6,13 @@ Opt-in baseline for the PostgreSQL row-owned-span experiment.
 
 The timed path deliberately starts at an already-framed `RawMessage`: the
 experiment does not change the framer's payload copy.  Each iteration runs the
-production `Backend.decode`, grows the same owned row-array shape as
+production `Backend.decodeDataRowSpans`, grows the same owned row-array shape as
 `Pg.Connection.foldExecute`, and only then invokes the actual generated
-`ListWidgets` prepared decoder retained in `spec.preparedDecode`.
+`ListWidgets` prepared decoder retained in `spec.preparedSpanDecode`.
 
 All wire construction, decoder selection, exact-field equivalence checks, and
-warmup happen outside the timed region.  The baseline materializes six owned
-cell `ByteArray`s per row; that count is printed explicitly for comparison with
-the row-owned-span candidate.
+warmup happen outside the timed region.  The candidate materializes only text
+or fallback-codec cells; fixed-width binary integers read their row owner.
 -/
 
 private abbrev Values := Array (Option ByteArray)
@@ -22,7 +21,7 @@ private abbrev RowData := AcmeDb.Queries.ListWidgets.RowData
 
 private abbrev PreparedDecoder :=
   Pgx.Typed.TypeResolver → Array Pgx.Typed.ResolvedType →
-    Array Pg.Protocol.ColumnDesc → Values → Except Pgx.Typed.Error Row
+    Array Pg.Protocol.ColumnDesc → Pg.Protocol.DataRowSpans → Except Pgx.Typed.Error Row
 
 private inductive WireMode where
   | mixed
@@ -123,27 +122,26 @@ private def rowDataEq (left right : RowData) : Bool :=
 /-- This is intentionally the same initially-empty, push-grown result shape
 used by `Pg.Connection.foldExecute`; preallocating it would hide part of the
 production ownership path selected for this experiment. -/
-@[noinline] private def materializeRows
-    (messages : @& Array Pg.Protocol.RawMessage) : Except String (Array Values) := do
-  let mut rows : Array Values := #[]
+@[noinline] private def retainSpanRows
+    (messages : @& Array Pg.Protocol.RawMessage) : Except String (Array Pg.Protocol.DataRowSpans) := do
+  let mut rows : Array Pg.Protocol.DataRowSpans := #[]
   for message in messages do
-    match Pg.Protocol.Backend.decode message with
-    | .ok (.dataRow values) => rows := rows.push values
-    | .ok other => throw s!"expected DataRow, decoded {repr other}"
+    match Pg.Protocol.Backend.decodeDataRowSpans message with
+    | .ok values => rows := rows.push values
     | .error error => throw error
   pure rows
 
-@[noinline] private def decodeMaterializedRows (decode : @& PreparedDecoder)
+@[noinline] private def decodeSpanRows (decode : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
-    (columns : @& Array Pg.Protocol.ColumnDesc) (rows : @& Array Values) :
+    (columns : @& Array Pg.Protocol.ColumnDesc) (rows : @& Array Pg.Protocol.DataRowSpans) :
     Except Pgx.Typed.Error (Array Row) :=
   rows.mapM (decode resolve types columns)
 
-private def materializeAndDecode (decode : @& PreparedDecoder)
+private def retainAndDecode (decode : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) : Except String (Array Row) := do
-  let materialized ← materializeRows fixture.messages
-  match decodeMaterializedRows decode resolve types fixture.columns materialized with
+  let rows ← retainSpanRows fixture.messages
+  match decodeSpanRows decode resolve types fixture.columns rows with
   | .ok rows => pure rows
   | .error error => throw error.toMessage
 
@@ -152,7 +150,7 @@ private def materializeAndDecode (decode : @& PreparedDecoder)
     (fixture : @& Fixture) (iterations : Nat) : IO UInt64 := do
   let mut checksum : UInt64 := 0
   for _ in [0:iterations] do
-    let rows ← match materializeAndDecode decode resolve types fixture with
+    let rows ← match retainAndDecode decode resolve types fixture with
       | .ok rows => pure rows
       | .error error => throw (IO.userError error)
     for row in rows do
@@ -171,7 +169,7 @@ private def validateRows (label : String) (actual : Array Row)
 private def validateFixture (decode : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) : IO Unit := do
-  let rows ← match materializeAndDecode decode resolve types fixture with
+  let rows ← match retainAndDecode decode resolve types fixture with
     | .ok rows => pure rows
     | .error error => throw (IO.userError s!"{fixture.label}: {error}")
   validateRows fixture.label rows fixture.expected
@@ -216,10 +214,12 @@ private def reportFixture (fixture : @& Fixture) (iterations : Nat)
   let rows := fixture.expected.size * iterations
   let perBatch100 := if batches == 0 then 0 else elapsed * 100 / batches
   let perRow100 := if rows == 0 then 0 else elapsed * 100 / rows
+  let materializedCellsPerRow := fixture.columns.foldl (fun count column =>
+    if column.format == 1 then count else count + 1) 0
   IO.println <| s!"case={fixture.label} rows_per_iteration={fixture.expected.size} " ++
     s!"formats={formatVector fixture.columns} wire_payload_bytes={fixture.wirePayloadBytes} " ++
-    s!"materialized_cells_per_row=6 " ++
-    s!"materialized_cells_per_batch={fixture.expected.size * 6}"
+    s!"materialized_cells_per_row={materializedCellsPerRow} " ++
+    s!"materialized_cells_per_batch={fixture.expected.size * materializedCellsPerRow}"
   IO.println <| s!"case={fixture.label} first_row_checksum={fixture.expectedFirstRowChecksum} " ++
     s!"last_row_checksum={fixture.expectedLastRowChecksum} " ++
     s!"batch_checksum={fixture.expectedBatchChecksum} measured_checksum={checksum}"
@@ -270,11 +270,11 @@ private def parseArgs (args : List String) : IO (Nat × Nat) := do
 private def benchmark (decode : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixtures : @& Array Fixture) (iterations rounds : Nat) : IO Unit := do
-  IO.println "benchmark=row_owned_span_baseline_v1 representation=owned_cell_bytearrays"
+  IO.println "benchmark=row_owned_span_candidate_v1 representation=row_payload_packed_spans"
   IO.println s!"iterations={iterations} rounds={rounds}"
   for fixture in fixtures do
     measureFixture decode resolve types fixture iterations rounds
-  IO.println "row-owned span baseline benchmark completed"
+  IO.println "row-owned span candidate benchmark completed"
 
 def main (args : List String) : IO Unit := do
   let (iterations, rounds) ← parseArgs args
@@ -282,9 +282,9 @@ def main (args : List String) : IO Unit := do
   let mixed55 := makeFixture "mixed_55" .mixed expected55
   let mixed1 := makeFixture "mixed_1" .mixed (expected55.extract 0 1)
   let text55 := makeFixture "all_text_55" .allText expected55
-  let decode ← match AcmeDb.Queries.ListWidgets.spec.preparedDecode with
+  let decode ← match AcmeDb.Queries.ListWidgets.spec.preparedSpanDecode with
     | some decode => pure decode
-    | none => throw (IO.userError "ListWidgets has no generated prepared decoder")
+    | none => throw (IO.userError "ListWidgets has no generated span decoder")
   -- `ListWidgets` consists entirely of planned built-ins, so its generated
   -- decoder intentionally ignores the resolver/type array and dispatches from
   -- the already-validated physical ColumnDesc OID/format pair.  A fail-closed
