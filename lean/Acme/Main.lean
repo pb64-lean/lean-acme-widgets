@@ -9,6 +9,8 @@ import Pg
 The Acme Widgets server: PostgreSQL through the generated lean-pgx contract
 over pg-lean (`ACME_DATABASE_URL`, default the docker-compose instance) + the
 gRPC WidgetService (`ACME_LISTEN_PORT`, default 50061) with reflection enabled.
+Response compression is opt-in through `ACME_RESPONSE_COMPRESSION`; request
+gzip support remains enabled independently.
 
 Composition is Lentil beans: `@[lentil_config]` loads `AcmeConfig` from the
 `ACME_` environment prefix, `@[lentil]` recipes build the connection,
@@ -54,6 +56,7 @@ instance : EnvValue Acme.Auth.TokenTable where
 structure AcmeConfig where
   databaseUrl : String := defaultDatabaseUrl
   listenPort : UInt16 := 50061
+  responseCompression : Bool := false
   bearerTokens : Option Acme.Auth.TokenTable
   tlsCertificate : Option System.FilePath
   tlsSigningKey : Option System.FilePath
@@ -98,9 +101,10 @@ structure TlsFiles where
     IO.println "auth: built-in demo bearer-token table"
     pure Acme.Auth.demoTable
 
-@[lentil] def registry (repo : Acme.Repo.Repo) (table : Acme.Auth.TokenTable) :
-    Grpc.Registry :=
+@[lentil] def registry (cfg : AcmeConfig) (repo : Acme.Repo.Repo)
+    (table : Acme.Auth.TokenTable) : Grpc.Registry :=
   Acme.Service.registry repo table
+    |>.withResponseCompression cfg.responseCompression
 
 @[lentil] def serverConfig (cfg : AcmeConfig) : Grpc.Server.Config :=
   { address := Grpc.Server.anyIPv4 cfg.listenPort }

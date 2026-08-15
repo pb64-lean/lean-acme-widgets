@@ -136,6 +136,7 @@ graph during elaboration and generates the startup code:
 | --- | --- | --- |
 | `ACME_DATABASE_URL` | string; `postgres://acme@localhost:54398/acme` | PostgreSQL connection URI |
 | `ACME_LISTEN_PORT` | checked `UInt16`; `50061` | gRPC listener port |
+| `ACME_RESPONSE_COMPRESSION` | boolean; `false` | Enable negotiated gzip responses; request gzip remains supported |
 | `ACME_BEARER_TOKENS` | optional `token:id:role_level,...` | Authentication table; absent uses the demo table |
 | `ACME_TLS_CERTIFICATE` | optional file path | DER leaf certificate |
 | `ACME_TLS_SIGNING_KEY` | optional file path | 32-byte Ed25519 signing key |
