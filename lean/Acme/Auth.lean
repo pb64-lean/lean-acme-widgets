@@ -22,9 +22,11 @@ The security claim, precisely:
   constructor is `private`, and the Lean module system makes a `private`
   constructor invisible to ordinary importers (only `import all Acme.Auth`,
   the white-box escape hatch used by in-repo proof/test targets, can see it).
-  The only producers are `TokenTable.ofEntries`/`parse` + `lookup?` /
-  `authenticate`, so *holding* an `AuthenticatedPrincipal` is evidence that a
-  configured bearer token vouched for exactly this `(id, role_level)` pair.
+  `TokenTable.ofEntries`/`parse` are the only minting paths; `lookup?`,
+  `authenticate`, and startup-bound values built with `TokenTable.bind` can
+  only return principals originating there. Thus *holding* an
+  `AuthenticatedPrincipal` is evidence that configuration vouched for exactly
+  this `(id, role_level)` pair.
 * What remains trusted: the token table itself (server configuration) and
   the transport keeping tokens confidential (serve TLS in production).
 -/
@@ -109,11 +111,43 @@ def TokenTable.lookup? (table : TokenTable) (token : String) :
     Option AuthenticatedPrincipal :=
   table.entries.findSome? fun (t, p) => if t == token then some p else none
 
+/-- Values constructed once from every authenticated principal in a token
+table.  The constructor is private so an entry can only be associated with a
+token by `TokenTable.bind`, which applies the builder to that token's exact
+authenticated principal while preserving first-match lookup order. -/
+structure TokenTable.Bound (α : Type) where
+  private mk ::
+  private entries : Array (String × α)
+
+/-- Bind immutable per-principal state to every configured credential.  This
+is intended for startup assembly of handler dispatch or other process-lifetime
+capabilities, keeping their construction off the request path. -/
+def TokenTable.bind (table : TokenTable)
+    (build : AuthenticatedPrincipal → α) : TokenTable.Bound α :=
+  ⟨table.entries.map fun (token, principal) => (token, build principal)⟩
+
+def TokenTable.Bound.lookup? (table : TokenTable.Bound α) (token : String) :
+    Option α :=
+  table.entries.findSome? fun (configured, value) =>
+    if configured == token then some value else none
+
 /-- Extract the token of an `authorization: Bearer <token>` header. -/
 def bearerToken? (metadata : Grpc.Metadata) : Option String :=
   match (metadata.getAll "authorization").back? with
   | some v => if v.startsWith "Bearer " then some (v.drop 7).toString else none
   | none => none
+
+/-- Authenticate headers directly to their startup-bound capability.  Header
+selection and rejection statuses deliberately match `TokenTable.authenticate`. -/
+def TokenTable.Bound.authenticate (table : TokenTable.Bound α)
+    (metadata : Grpc.Metadata) : Except Grpc.Status α :=
+  match bearerToken? metadata with
+  | none => .error (Grpc.Status.error .unauthenticated
+      "missing authorization bearer token")
+  | some token =>
+    match table.lookup? token with
+    | some value => .ok value
+    | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 
 /-- Authenticate a request's headers. Missing or unknown credentials are
 UNAUTHENTICATED (gRPC: the caller could not be identified at all). -/

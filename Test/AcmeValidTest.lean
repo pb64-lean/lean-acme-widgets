@@ -183,6 +183,35 @@ def main : IO Unit := do
   expectUnauthenticated (some "Bearer bogus") "unknown token"
   expectUnauthenticated (some "Basic acme-editor-7") "wrong scheme"
 
+  -- Startup-bound capabilities retain the exact principal for each token;
+  -- selecting one credential can never return another principal's value.
+  let boundIdentities := table.bind fun principal =>
+    (principal.id, principal.roleLevel)
+  let boundEditor7 ← match boundIdentities.authenticate
+      (headers (some "Bearer acme-editor-7")) with
+    | .ok value => pure value
+    | .error s => throw (IO.userError s!"bound editor-7 token rejected: {s.messageD}")
+  let boundEditor8 ← match boundIdentities.authenticate
+      (headers (some "Bearer acme-editor-8")) with
+    | .ok value => pure value
+    | .error s => throw (IO.userError s!"bound editor-8 token rejected: {s.messageD}")
+  expect (boundEditor7 == (7, 2)) "editor-7 bound capability"
+  expect (boundEditor8 == (8, 2)) "editor-8 bound capability"
+  expect (boundEditor7 != boundEditor8) "principal-bound capability isolation"
+  expect (boundIdentities.authenticate (headers (some "Bearer bogus")) |>.isOk |> not)
+    "unknown token selected a bound capability"
+  let boundHandlers := table.bind fun principal => fun (_ : Unit) => principal.id
+  let editor7Handler ← match boundHandlers.authenticate
+      (headers (some "Bearer acme-editor-7")) with
+    | .ok handler => pure handler
+    | .error s => throw (IO.userError s!"bound editor-7 handler rejected: {s.messageD}")
+  let editor8Handler ← match boundHandlers.authenticate
+      (headers (some "Bearer acme-editor-8")) with
+    | .ok handler => pure handler
+    | .error s => throw (IO.userError s!"bound editor-8 handler rejected: {s.messageD}")
+  expect (editor7Handler () == 7) "editor-7 handler captured another principal"
+  expect (editor8Handler () == 8) "editor-8 handler captured another principal"
+
   -- misconfigured tables fail at construction
   expect (Acme.Auth.TokenTable.parse "t:7:2,u:8:1" |>.isOk) "valid spec parses"
   expect (!(Acme.Auth.TokenTable.parse "t:0:2" |>.isOk)) "id 0 rejected"
