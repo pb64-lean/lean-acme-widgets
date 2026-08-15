@@ -1,6 +1,13 @@
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+_LOAD_DEPS = [
+    "//proto:acme_py_pb2",
+    "//proto:acme_py_pb2_grpc",
+    "@acme_pip//grpcio",
+    "@rules_python//python/runfiles",
+]
 
 py_binary(
     name = "acme_load",
@@ -12,10 +19,18 @@ py_binary(
         "//lean/Acme:acme_server",
     ],
     main = "acme_load.py",
-    deps = [
-        "//proto:acme_py_pb2",
-        "//proto:acme_py_pb2_grpc",
-        "@acme_pip//grpcio",
-        "@rules_python//python/runfiles",
-    ],
+    deps = _LOAD_DEPS,
+)
+
+py_library(
+    name = "acme_load_lib",
+    srcs = ["acme_load.py"],
+    deps = _LOAD_DEPS,
+)
+
+py_test(
+    name = "acme_load_test",
+    size = "small",
+    srcs = ["acme_load_test.py"],
+    deps = [":acme_load_lib"],
 )

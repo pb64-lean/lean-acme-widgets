@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent-channel randomized CRUD load test for Acme Widgets."""
+"""Persistent-channel randomized CRUD benchmark for Acme Widgets."""
 
 from __future__ import annotations
 
@@ -7,14 +7,20 @@ import argparse
 import asyncio
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
 import os
 from pathlib import Path
+import platform
 import random
+import socket
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 import grpc
 from proto import authz_pb2
@@ -26,19 +32,151 @@ from python.runfiles import runfiles
 AUTH_METADATA = (("authorization", "Bearer acme-editor-7"),)
 PRINCIPAL = authz_pb2.Principal(id=7, role_level=2)
 OPERATIONS = ("get", "list", "update", "create", "delete")
+OPERATION_WEIGHTS = {
+    "get": 55,
+    "list": 20,
+    "update": 15,
+    "create": 8,
+    "delete": 2,
+}
+LOCAL_SOURCE_REPOSITORIES = (
+    "lean-acme-widgets",
+    "rules_lean",
+    "grpc-lean",
+    "protovalidate-lean",
+    "tls13-lean",
+    "pg-lean",
+    "lean-pgx",
+)
+
+# The histogram keeps 32 buckets per power of two after exact 0--31 ns
+# buckets. Recording is one bit_length, shift, and list increment; quantiles
+# are computed only after a phase. The upper-bound estimate is within one
+# bucket (at most 3.125%) of the recorded latency.
+HISTOGRAM_SUB_BUCKET_BITS = 5
+HISTOGRAM_SUB_BUCKETS = 1 << HISTOGRAM_SUB_BUCKET_BITS
+HISTOGRAM_BUCKET_COUNT = 2048
+
+
+def latency_bucket_index(latency_ns: int) -> int:
+    if latency_ns < HISTOGRAM_SUB_BUCKETS:
+        return max(latency_ns, 0)
+    magnitude = latency_ns.bit_length() - 1
+    shift = magnitude - HISTOGRAM_SUB_BUCKET_BITS
+    return (
+        HISTOGRAM_SUB_BUCKETS
+        + shift * HISTOGRAM_SUB_BUCKETS
+        + (latency_ns >> shift)
+        - HISTOGRAM_SUB_BUCKETS
+    )
+
+
+def latency_bucket_upper_bound(index: int) -> int:
+    if index < HISTOGRAM_SUB_BUCKETS:
+        return index
+    offset = index - HISTOGRAM_SUB_BUCKETS
+    shift, sub_bucket_offset = divmod(offset, HISTOGRAM_SUB_BUCKETS)
+    sub_bucket = HISTOGRAM_SUB_BUCKETS + sub_bucket_offset
+    return ((sub_bucket + 1) << shift) - 1
+
+
+@dataclass
+class LatencyHistogram:
+    buckets: list[int] = field(
+        default_factory=lambda: [0] * HISTOGRAM_BUCKET_COUNT,
+    )
+    count: int = 0
+    total_ns: int = 0
+    maximum_ns: int = 0
+
+    def record(self, latency_ns: int) -> None:
+        index = latency_bucket_index(latency_ns)
+        if index >= len(self.buckets):
+            self.buckets.extend([0] * (index + 1 - len(self.buckets)))
+        self.buckets[index] += 1
+        self.count += 1
+        self.total_ns += latency_ns
+        self.maximum_ns = max(self.maximum_ns, latency_ns)
+
+    def merge(self, other: "LatencyHistogram") -> None:
+        if len(other.buckets) > len(self.buckets):
+            self.buckets.extend([0] * (len(other.buckets) - len(self.buckets)))
+        for index, count in enumerate(other.buckets):
+            self.buckets[index] += count
+        self.count += other.count
+        self.total_ns += other.total_ns
+        self.maximum_ns = max(self.maximum_ns, other.maximum_ns)
+
+    def quantile_ns(self, quantile: float) -> int:
+        if self.count == 0:
+            return 0
+        rank = max(1, math.ceil(quantile * self.count))
+        seen = 0
+        for index, count in enumerate(self.buckets):
+            seen += count
+            if seen >= rank:
+                return latency_bucket_upper_bound(index)
+        raise AssertionError("latency histogram count does not match its buckets")
+
+    def as_milliseconds(self) -> dict[str, float | str]:
+        return {
+            "scope": "all_attempts",
+            "mean": self.total_ns / self.count / 1_000_000 if self.count else 0.0,
+            "p95": self.quantile_ns(0.95) / 1_000_000,
+            "p99": self.quantile_ns(0.99) / 1_000_000,
+            "max": self.maximum_ns / 1_000_000,
+        }
 
 
 @dataclass
 class Results:
-    completed: Counter[str] = field(default_factory=Counter)
+    attempted: Counter[str] = field(default_factory=Counter)
+    successful: Counter[str] = field(default_factory=Counter)
     failures: Counter[str] = field(default_factory=Counter)
-    latency_ns: Counter[str] = field(default_factory=Counter)
+    latency: dict[str, LatencyHistogram] = field(
+        default_factory=lambda: {name: LatencyHistogram() for name in OPERATIONS},
+    )
 
     def record(self, operation: str, started_ns: int, failure: str | None) -> None:
-        self.completed[operation] += 1
-        self.latency_ns[operation] += time.monotonic_ns() - started_ns
-        if failure is not None:
+        self.attempted[operation] += 1
+        self.latency[operation].record(time.monotonic_ns() - started_ns)
+        if failure is None:
+            self.successful[operation] += 1
+        else:
             self.failures[failure] += 1
+
+    @property
+    def total_attempted(self) -> int:
+        return sum(self.attempted.values())
+
+    @property
+    def total_successful(self) -> int:
+        return sum(self.successful.values())
+
+    @property
+    def total_failed(self) -> int:
+        return self.total_attempted - self.total_successful
+
+    def combined_latency(self) -> LatencyHistogram:
+        combined = LatencyHistogram()
+        for histogram in self.latency.values():
+            combined.merge(histogram)
+        return combined
+
+
+@dataclass(frozen=True)
+class PhaseResult:
+    elapsed_seconds: float
+    client_cpu_seconds: float
+    results: Results
+
+
+@dataclass
+class WorkerState:
+    worker_id: int
+    stub: service_pb2_grpc.WidgetServiceStub
+    rng: random.Random
+    sequence: int = 0
 
 
 def env_int(name: str, default: int) -> int:
@@ -51,6 +189,22 @@ def env_float(name: str, default: float) -> float:
     return default if value is None else float(value)
 
 
+def parse_channel_counts(value: str) -> tuple[int, ...]:
+    try:
+        counts = tuple(int(item.strip()) for item in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "channel counts must be comma-separated positive integers",
+        ) from error
+    if not counts or any(count <= 0 for count in counts):
+        raise argparse.ArgumentTypeError(
+            "channel counts must be comma-separated positive integers",
+        )
+    if len(set(counts)) != len(counts):
+        raise argparse.ArgumentTypeError("channel counts must not repeat")
+    return counts
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     port = env_int("ACME_PORT", 50062)
     parser = argparse.ArgumentParser(
@@ -61,8 +215,24 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help="managed server port (default: %(default)s)")
     parser.add_argument("--duration", type=float,
                         default=env_float("ACME_LOAD_DURATION_SECONDS", 8.0))
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=env_float("ACME_LOAD_WARMUP_SECONDS", 2.0),
+        help="excluded warmup duration in seconds (default: %(default)s)",
+    )
     parser.add_argument("--concurrency", type=int,
                         default=env_int("ACME_LOAD_WORKERS", 48))
+    parser.add_argument(
+        "--channels",
+        type=parse_channel_counts,
+        default=parse_channel_counts(os.environ.get("ACME_LOAD_CHANNELS", "1")),
+        metavar="COUNT[,COUNT...]",
+        help=(
+            "persistent channel count or ordered topology sweep; workers are "
+            "assigned by worker id modulo channel count (default: 1)"
+        ),
+    )
     parser.add_argument("--seed-count", type=int, default=64)
     parser.add_argument("--random-seed", type=int,
                         default=env_int("ACME_LOAD_RANDOM_SEED", time.time_ns()))
@@ -73,6 +243,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="per-RPC deadline in seconds; 0 disables it (default: %(default)s)",
     )
     parser.add_argument(
+        "--json-output",
+        default=os.environ.get("ACME_LOAD_JSON_OUTPUT"),
+        metavar="PATH",
+        help="write the complete versioned result document as JSON",
+    )
+    parser.add_argument(
         "--manage-stack",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -81,8 +257,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.duration <= 0:
         parser.error("--duration must be positive")
+    if args.warmup < 0:
+        parser.error("--warmup cannot be negative")
     if args.concurrency <= 0:
         parser.error("--concurrency must be positive")
+    if any(count > args.concurrency for count in args.channels):
+        parser.error("--channels counts cannot exceed --concurrency")
     if args.seed_count <= 0:
         parser.error("--seed-count must be positive")
     if args.rpc_timeout < 0:
@@ -303,81 +483,343 @@ def choose_operation(rng: random.Random) -> str:
 
 
 async def load_worker(
-    stub: service_pb2_grpc.WidgetServiceStub,
-    worker_id: int,
+    state: WorkerState,
     end: float,
     hot_ids: tuple[int, ...],
     timeout: float | None,
-    random_seed: int,
     results: Results,
 ) -> None:
-    rng = random.Random(random_seed + worker_id)
-    sequence = 0
     while time.monotonic() < end:
-        operation = choose_operation(rng)
+        operation = choose_operation(state.rng)
         started_ns = time.monotonic_ns()
         failure: str | None = None
         try:
             await one_operation(
-                stub, operation, rng, worker_id, sequence, hot_ids, timeout,
+                state.stub,
+                operation,
+                state.rng,
+                state.worker_id,
+                state.sequence,
+                hot_ids,
+                timeout,
             )
         except grpc.aio.AioRpcError as error:
             failure = error.code().name
         except Exception as error:  # Preserve unexpected client failures in the report.
             failure = type(error).__name__
         results.record(operation, started_ns, failure)
-        sequence += 1
+        state.sequence += 1
+
+
+def channel_options(channel_count: int) -> tuple[tuple[str, int], ...]:
+    if channel_count == 1:
+        # Keep the original one-channel construction and C-core defaults intact.
+        return ()
+    return (
+        # Without a local pool, separately constructed Python channels may share
+        # one C-core subchannel (and therefore one HTTP/2/TCP connection).
+        ("grpc.use_local_subchannel_pool", 1),
+    )
+
+
+def worker_channel_index(worker_id: int, channel_count: int) -> int:
+    return worker_id % channel_count
+
+
+def make_channels(address: str, channel_count: int) -> list[grpc.aio.Channel]:
+    if channel_count == 1:
+        return [grpc.aio.insecure_channel(address)]
+    return [
+        grpc.aio.insecure_channel(
+            address,
+            options=channel_options(channel_count),
+        )
+        for _ in range(channel_count)
+    ]
+
+
+async def run_phase(
+    workers: Sequence[WorkerState],
+    duration: float,
+    hot_ids: tuple[int, ...],
+    timeout: float | None,
+) -> PhaseResult:
+    results = Results()
+    started = time.monotonic()
+    cpu_started_ns = time.process_time_ns()
+    end = started + duration
+    if duration > 0:
+        await asyncio.gather(*(
+            load_worker(worker, end, hot_ids, timeout, results)
+            for worker in workers
+        ))
+    elapsed = time.monotonic() - started
+    client_cpu_seconds = (time.process_time_ns() - cpu_started_ns) / 1_000_000_000
+    return PhaseResult(elapsed, client_cpu_seconds, results)
+
+
+def phase_document(phase: PhaseResult) -> dict[str, Any]:
+    results = phase.results
+    attempted = results.total_attempted
+    successful = results.total_successful
+    combined_latency = results.combined_latency()
+    by_operation: dict[str, Any] = {}
+    for operation in OPERATIONS:
+        operation_attempted = results.attempted[operation]
+        operation_successful = results.successful[operation]
+        by_operation[operation] = {
+            "attempted": operation_attempted,
+            "successful": operation_successful,
+            "failed": operation_attempted - operation_successful,
+            "latency_ms": results.latency[operation].as_milliseconds(),
+        }
+    return {
+        "elapsed_seconds": phase.elapsed_seconds,
+        "client_cpu_seconds": phase.client_cpu_seconds,
+        "client_cpu_utilization_percent": (
+            100.0 * phase.client_cpu_seconds / phase.elapsed_seconds
+            if phase.elapsed_seconds
+            else 0.0
+        ),
+        "counts": {
+            "attempted": attempted,
+            "successful": successful,
+            "failed": attempted - successful,
+            "by_operation": by_operation,
+            "failures_by_status": dict(sorted(results.failures.items())),
+        },
+        "throughput_iops": {
+            "attempted": attempted / phase.elapsed_seconds if phase.elapsed_seconds else 0.0,
+            "successful": successful / phase.elapsed_seconds if phase.elapsed_seconds else 0.0,
+        },
+        "latency_ms": combined_latency.as_milliseconds(),
+    }
+
+
+def topology_document(
+    channel_count: int,
+    concurrency: int,
+    warmup: PhaseResult,
+    measurement: PhaseResult,
+) -> dict[str, Any]:
+    workers_per_channel = [0] * channel_count
+    for worker_id in range(concurrency):
+        workers_per_channel[worker_channel_index(worker_id, channel_count)] += 1
+    return {
+        "channels": channel_count,
+        "connection_topology": {
+            "persistent_during_warmup_and_measurement": True,
+            "ready_channels": channel_count,
+            "subchannel_pool": (
+                "grpc_default_shared" if channel_count == 1 else "local_per_channel"
+            ),
+            "connection_isolation_option": (
+                None if channel_count == 1 else "grpc.use_local_subchannel_pool=1"
+            ),
+            "worker_assignment": "worker_id_modulo_channel_count",
+            "workers_per_channel": workers_per_channel,
+        },
+        "warmup_excluded": phase_document(warmup),
+        "measurement": phase_document(measurement),
+    }
+
+
+def print_topology_result(
+    args: argparse.Namespace,
+    channel_count: int,
+    warmup: PhaseResult,
+    measurement: PhaseResult,
+) -> None:
+    results = measurement.results
+    attempted = results.total_attempted
+    successful = results.total_successful
+    failed = results.total_failed
+    latency = results.combined_latency().as_milliseconds()
+    operations = ", ".join(
+        f"{name}={results.successful[name]}/{results.attempted[name]}"
+        for name in OPERATIONS
+    )
+    print(
+        f"Excluded warmup (channels={channel_count}): "
+        f"{warmup.results.total_attempted} attempts in "
+        f"{warmup.elapsed_seconds:.3f}s, {warmup.results.total_failed} failures"
+    )
+    print(
+        f"ACME mixed load (channels={channel_count}): {attempted} attempts, "
+        f"{successful} successful in {measurement.elapsed_seconds:.3f}s = "
+        f"{attempted / measurement.elapsed_seconds:.1f} attempted IOPS, "
+        f"{successful / measurement.elapsed_seconds:.1f} successful IOPS"
+    )
+    print(f"Successful/attempted by operation: {operations}")
+    print(
+        "RPC latency (all attempts): "
+        f"mean={latency['mean']:.3f} ms, p95={latency['p95']:.3f} ms, "
+        f"p99={latency['p99']:.3f} ms, max={latency['max']:.3f} ms"
+    )
+    print(
+        f"Client process CPU: {measurement.client_cpu_seconds:.3f}s = "
+        f"{100.0 * measurement.client_cpu_seconds / measurement.elapsed_seconds:.1f}% "
+        "(100%=one logical core)"
+    )
+    print(
+        f"RPC failures: {failed} "
+        f"({100.0 * failed / attempted if attempted else 0.0:.3f}%)"
+    )
+    if failed:
+        print("Failure statuses: " + ", ".join(
+            f"{status}={count}" for status, count in sorted(results.failures.items())
+        ))
+    topology = (
+        "one shared persistent HTTP/2 channel"
+        if channel_count == 1
+        else (
+            f"{channel_count} persistent HTTP/2 channels with isolated local "
+            "subchannel pools"
+        )
+    )
+    print(
+        f"Configuration: warmup={args.warmup:g}s (excluded), "
+        f"duration={args.duration:g}s, concurrency={args.concurrency}, {topology}, "
+        f"rpc_timeout={args.rpc_timeout:g}s, random_seed={args.random_seed}"
+    )
+
+
+def git_repository_metadata(repository: Path) -> dict[str, Any]:
+    if not Path(repository, ".git").exists():
+        return {"path": str(repository), "revision": None, "dirty": None}
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout)
+        return {"path": str(repository), "revision": revision, "dirty": dirty}
+    except (OSError, subprocess.SubprocessError):
+        return {"path": str(repository), "revision": None, "dirty": None}
+
+
+def file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def source_metadata() -> dict[str, Any]:
+    workspace = Path(os.environ.get("BUILD_WORKSPACE_DIRECTORY", Path.cwd())).resolve()
+    repositories = {
+        name: git_repository_metadata(
+            workspace if name == "lean-acme-widgets" else Path(workspace.parent, name),
+        )
+        for name in LOCAL_SOURCE_REPOSITORIES
+    }
+    return {
+        "repositories": repositories,
+        "bazel_module_sha256": file_sha256(Path(workspace, "MODULE.bazel")),
+        "bazel_module_lock_sha256": file_sha256(Path(workspace, "MODULE.bazel.lock")),
+    }
+
+
+def result_document(args: argparse.Namespace, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": "pb64-lean.acme-load-result",
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "benchmark": "acme_widgets_weighted_crud",
+        "configuration": {
+            "address": args.address,
+            "manage_stack": args.manage_stack,
+            "warmup_seconds": args.warmup,
+            "measurement_seconds": args.duration,
+            "concurrency": args.concurrency,
+            "channel_sweep": list(args.channels),
+            "seed_count": args.seed_count,
+            "random_seed": args.random_seed,
+            "rpc_timeout_seconds": args.rpc_timeout,
+            "operation_weights_percent": OPERATION_WEIGHTS,
+            "latency_quantiles": {
+                "scope": "all_attempts",
+                "method": "log_histogram_upper_bound",
+                "sub_buckets_per_power_of_two": HISTOGRAM_SUB_BUCKETS,
+                "maximum_relative_bucket_width": 1 / HISTOGRAM_SUB_BUCKETS,
+            },
+        },
+        "client_machine": {
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "logical_cpu_count": os.cpu_count(),
+            "python_version": platform.python_version(),
+            "grpcio_version": grpc.__version__,
+        },
+        "source": source_metadata(),
+        "runs": runs,
+    }
+
+
+def write_json_result(path: str, document: dict[str, Any]) -> None:
+    destination = Path(path)
+    try:
+        destination.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as error:
+        raise RuntimeError(f"cannot write JSON result {destination}: {error}") from error
 
 
 async def run_load(args: argparse.Namespace) -> int:
-    channel = grpc.aio.insecure_channel(args.address)
-    try:
-        await asyncio.wait_for(channel.channel_ready(), timeout=30)
-        stub = service_pb2_grpc.WidgetServiceStub(channel)
-        timeout = rpc_timeout(args.rpc_timeout)
-        hot_ids = await seed_widgets(stub, args.seed_count, timeout)
+    timeout = rpc_timeout(args.rpc_timeout)
+    hot_ids: tuple[int, ...] | None = None
+    run_documents: list[dict[str, Any]] = []
+    failed = False
 
-        results = Results()
-        started = time.monotonic()
-        end = started + args.duration
-        await asyncio.gather(*(
-            load_worker(
-                stub, worker, end, hot_ids, timeout, args.random_seed, results,
-            )
-            for worker in range(args.concurrency)
-        ))
-        elapsed = time.monotonic() - started
-
-        total = sum(results.completed.values())
-        failures = sum(results.failures.values())
-        operations = ", ".join(
-            f"{name}={results.completed[name]}" for name in OPERATIONS
-        )
-        mean_ms = (
-            sum(results.latency_ns.values()) / total / 1_000_000 if total else 0.0
-        )
-        print(
-            f"ACME mixed load: {total} requests in {elapsed:.3f}s = "
-            f"{total / elapsed:.1f} request IOPS"
-        )
-        print(f"Completed by operation: {operations}")
-        print(f"Mean RPC latency: {mean_ms:.3f} ms")
-        print(
-            f"RPC failures: {failures} "
-            f"({100.0 * failures / total if total else 0.0:.3f}%)"
-        )
-        if failures:
-            print("Failure statuses: " + ", ".join(
-                f"{status}={count}" for status, count in sorted(results.failures.items())
+    for channel_count in args.channels:
+        channels = make_channels(args.address, channel_count)
+        try:
+            await asyncio.gather(*(
+                asyncio.wait_for(channel.channel_ready(), timeout=30)
+                for channel in channels
             ))
-        print(
-            f"Configuration: duration={args.duration:g}s, "
-            f"concurrency={args.concurrency}, one persistent HTTP/2 channel, "
-            f"rpc_timeout={args.rpc_timeout:g}s, random_seed={args.random_seed}"
-        )
-        return 1 if failures else 0
-    finally:
-        await channel.close()
+            stubs = [service_pb2_grpc.WidgetServiceStub(channel) for channel in channels]
+            if hot_ids is None:
+                hot_ids = await seed_widgets(stubs[0], args.seed_count, timeout)
+            workers = [
+                WorkerState(
+                    worker_id=worker_id,
+                    stub=stubs[worker_channel_index(worker_id, channel_count)],
+                    rng=random.Random(args.random_seed + worker_id),
+                )
+                for worker_id in range(args.concurrency)
+            ]
+            warmup = await run_phase(workers, args.warmup, hot_ids, timeout)
+            measurement = await run_phase(workers, args.duration, hot_ids, timeout)
+            print_topology_result(args, channel_count, warmup, measurement)
+            run_documents.append(topology_document(
+                channel_count,
+                args.concurrency,
+                warmup,
+                measurement,
+            ))
+            failed = failed or warmup.results.total_failed > 0
+            failed = failed or measurement.results.total_failed > 0
+        finally:
+            await asyncio.gather(*(channel.close() for channel in channels))
+
+    if args.json_output is not None:
+        write_json_result(args.json_output, result_document(args, run_documents))
+        print(f"Machine-readable result: {args.json_output}")
+    return 1 if failed else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
