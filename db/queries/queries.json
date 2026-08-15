@@ -28,7 +28,7 @@
   },
   "update_widget.sql": {
     "leanName": "UpdateWidget",
-    "cardinality": "zeroOrOne",
+    "cardinality": "execute",
     "parameters": [
       {"position": 1, "name": "widgetId", "nullable": false},
       {"position": 2, "name": "ownerId", "nullable": false},
@@ -40,7 +40,7 @@
   },
   "delete_widget.sql": {
     "leanName": "DeleteWidget",
-    "cardinality": "zeroOrOne",
+    "cardinality": "execute",
     "parameters": [
       {"position": 1, "name": "widgetId", "nullable": false},
       {"position": 2, "name": "ownerId", "nullable": false}

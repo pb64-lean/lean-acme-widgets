@@ -248,6 +248,22 @@ def Error.render : Error → String
 
 instance : ToString Error := ⟨Error.render⟩
 
+@[inline] private def affectedAtMostOne (zeroTag oneTag expected : String)
+    (result : Pgx.Typed.CommandResult) : Except Error Bool :=
+  if result.tag == zeroTag then .ok false
+  else if result.tag == oneTag then .ok true
+  else .error (.database (.cardinality expected result.tag))
+
+/-- Interpret PostgreSQL's exact UPDATE completion tag without accepting an
+unexpected verb, malformed count, or impossible multi-row result. -/
+@[inline] def updateAffected (result : Pgx.Typed.CommandResult) : Except Error Bool :=
+  affectedAtMostOne "UPDATE 0" "UPDATE 1" "UPDATE 0 or UPDATE 1" result
+
+/-- Interpret PostgreSQL's exact DELETE completion tag without accepting an
+unexpected verb, malformed count, or impossible multi-row result. -/
+@[inline] def deleteAffected (result : Pgx.Typed.CommandResult) : Except Error Bool :=
+  affectedAtMostOne "DELETE 0" "DELETE 1" "DELETE 0 or DELETE 1" result
+
 /-- Generic pure column-tuple → `Widget` decoder for non-proof-bearing
 callers and roundtrip assurance. Generated Get/List rows use their
 query-specific proof projections below. -/
@@ -385,7 +401,7 @@ def updateWidget (repo : Repo) (cap : AuthorizedUpdate) : IO (Except Error Bool)
       description := w.description
     }).block with
   | .error error => pure (.error (.database error))
-  | .ok row? => pure (.ok row?.isSome)
+  | .ok result => pure (updateAffected result)
 
 /-- Delete by (id, owner); `false` when nothing matched. `cap.self_or_admin`
 proves the named owner is the authenticated principal, or admin override. -/
@@ -398,7 +414,7 @@ def deleteWidget (repo : Repo) (cap : AuthorizedDelete) : IO (Except Error Bool)
     | .error error => return .error error
   match ← (AcmeDb.Queries.DeleteWidget.run repo.conn { widgetId, ownerId }).block with
   | .error error => pure (.error (.database error))
-  | .ok row? => pure (.ok row?.isSome)
+  | .ok result => pure (deleteAffected result)
 
 end Repo
 end Repo

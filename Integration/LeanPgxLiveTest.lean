@@ -126,7 +126,7 @@ private def exerciseCrud
   let updatedSku := "wgt-7002"
   let updatedQuantity : Int64 := 23
   let updatedDescription := "updated through generated SQL"
-  let updated? ← typed! "UpdateWidget.zeroOrOne" (←
+  let updated ← typed! "UpdateWidget.execute" (←
     AcmeDb.Queries.UpdateWidget.run conn {
       widgetId
       ownerId
@@ -135,10 +135,20 @@ private def exerciseCrud
       quantity := updatedQuantity
       description := updatedDescription
     })
-  let some updated := updated?
-    | fail "UpdateWidget.zeroOrOne: returned none for the inserted owner/id"
-  unless updated.val.id == widgetId do
-    fail s!"UpdateWidget.zeroOrOne: returned id {updated.val.id}, expected {widgetId}"
+  unless updated.tag == "UPDATE 1" do
+    fail s!"UpdateWidget.execute: expected UPDATE 1, got {updated.tag}"
+
+  let notUpdated ← typed! "UpdateWidget.execute wrong owner" (←
+    AcmeDb.Queries.UpdateWidget.run conn {
+      widgetId
+      ownerId := ownerId + 1
+      name := "must not be stored"
+      sku := "wgt-9999"
+      quantity := 99
+      description := "wrong owner"
+    })
+  unless notUpdated.tag == "UPDATE 0" do
+    fail s!"UpdateWidget.execute wrong owner: expected UPDATE 0, got {notUpdated.tag}"
 
   let fetchedUpdated? ← typed! "GetWidget.zeroOrOne after update" (←
     AcmeDb.Queries.GetWidget.run conn { widgetId })
@@ -147,12 +157,15 @@ private def exerciseCrud
   expectWidget "GetWidget.zeroOrOne after update" fetchedUpdated widgetId ownerId
     updatedName updatedSku updatedQuantity updatedDescription
 
-  let deleted? ← typed! "DeleteWidget.zeroOrOne" (←
+  let deleted ← typed! "DeleteWidget.execute" (←
     AcmeDb.Queries.DeleteWidget.run conn { widgetId, ownerId })
-  let some deleted := deleted?
-    | fail "DeleteWidget.zeroOrOne: returned none for the inserted owner/id"
-  unless deleted.val.id == widgetId do
-    fail s!"DeleteWidget.zeroOrOne: returned id {deleted.val.id}, expected {widgetId}"
+  unless deleted.tag == "DELETE 1" do
+    fail s!"DeleteWidget.execute: expected DELETE 1, got {deleted.tag}"
+
+  let notDeleted ← typed! "DeleteWidget.execute repeated delete" (←
+    AcmeDb.Queries.DeleteWidget.run conn { widgetId, ownerId })
+  unless notDeleted.tag == "DELETE 0" do
+    fail s!"DeleteWidget.execute repeated delete: expected DELETE 0, got {notDeleted.tag}"
 
   let missing? ← typed! "GetWidget.zeroOrOne after delete" (←
     AcmeDb.Queries.GetWidget.run conn { widgetId })

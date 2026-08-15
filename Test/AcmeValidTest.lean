@@ -288,6 +288,34 @@ def main : IO Unit := do
   expect (Acme.Repo.widgetOfRow 1 (-7) "n" "s" 5 "" |>.isOk |> not)
     "negative owner_id rejected"
 
+  -- UPDATE/DELETE avoid a RETURNING row, but their wire completion tags are
+  -- accepted only for the exact zero-or-one outcomes promised by the key
+  -- predicates. Unexpected verbs, malformed counts, and multi-row results
+  -- fail closed as cardinality errors.
+  expect (match Acme.Repo.updateAffected { tag := "UPDATE 0" } with
+    | .ok affected => !affected
+    | .error _ => false) "UPDATE 0 maps to false"
+  expect (match Acme.Repo.updateAffected { tag := "UPDATE 1" } with
+    | .ok affected => affected
+    | .error _ => false) "UPDATE 1 maps to true"
+  expect (match Acme.Repo.updateAffected { tag := "UPDATE 2" } with
+    | .error (.database (.cardinality expected actual)) =>
+      expected == "UPDATE 0 or UPDATE 1" && actual == "UPDATE 2"
+    | _ => false) "multi-row UPDATE fails closed"
+  expect (match Acme.Repo.updateAffected { tag := "DELETE 1" } with
+    | .error (.database (.cardinality _ _)) => true
+    | _ => false) "wrong UPDATE verb fails closed"
+  expect (match Acme.Repo.deleteAffected { tag := "DELETE 0" } with
+    | .ok affected => !affected
+    | .error _ => false) "DELETE 0 maps to false"
+  expect (match Acme.Repo.deleteAffected { tag := "DELETE 1" } with
+    | .ok affected => affected
+    | .error _ => false) "DELETE 1 maps to true"
+  expect (match Acme.Repo.deleteAffected { tag := "DELETE many" } with
+    | .error (.database (.cardinality expected actual)) =>
+      expected == "DELETE 0 or DELETE 1" && actual == "DELETE many"
+    | _ => false) "malformed DELETE count fails closed"
+
   -- Generated query rows carry the SQL CHECK proofs needed by the hot-path
   -- mappers. Boundary values are projected exactly, without a second
   -- `Int` range decision in the repository.
