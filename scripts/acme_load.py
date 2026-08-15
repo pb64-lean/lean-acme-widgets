@@ -213,6 +213,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--address", default=f"127.0.0.1:{port}")
     parser.add_argument("--port", type=int, default=port,
                         help="managed server port (default: %(default)s)")
+    parser.add_argument(
+        "--server-binary",
+        metavar="PATH",
+        help=(
+            "managed server executable override; useful for interleaved "
+            "baseline/candidate runs (default: the Bazel runfile)"
+        ),
+    )
     parser.add_argument("--duration", type=float,
                         default=env_float("ACME_LOAD_DURATION_SECONDS", 8.0))
     parser.add_argument(
@@ -271,6 +279,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         f"127.0.0.1:{args.port}", f"localhost:{args.port}"
     }:
         parser.error("managed mode requires --address to use --port on localhost")
+    if args.server_binary is not None:
+        if not args.manage_stack:
+            parser.error("--server-binary requires managed mode")
+        server_binary = Path(args.server_binary).expanduser().resolve()
+        if not server_binary.is_file():
+            parser.error(f"--server-binary is not a file: {server_binary}")
+        if not os.access(server_binary, os.X_OK):
+            parser.error(f"--server-binary is not executable: {server_binary}")
+        args.server_binary = str(server_binary)
+    args.resolved_server_binary = None
     return args
 
 
@@ -287,7 +305,7 @@ def runfile(logical_path: str) -> Path:
 class ManagedStack:
     """Owns a uniquely named Compose project and the runfile server process."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, server_binary: str | None = None) -> None:
         self.port = port
         self.project = f"acme-load-{os.getpid()}"
         workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
@@ -296,7 +314,11 @@ class ManagedStack:
             self.compose_file = workspace_compose
         else:
             self.compose_file = runfile("_main/docker-compose.yml")
-        self.server_binary = runfile("_main/lean/Acme/acme_server")
+        self.server_binary = (
+            Path(server_binary)
+            if server_binary is not None
+            else runfile("_main/lean/Acme/acme_server")
+        )
         self.compose = [
             "docker", "compose", "-f", str(self.compose_file),
             "-p", self.project,
@@ -714,6 +736,21 @@ def file_sha256(path: Path) -> str | None:
         return None
 
 
+def server_binary_metadata(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    binary = Path(path)
+    try:
+        stat = binary.stat()
+    except OSError:
+        return {"path": str(binary), "size_bytes": None, "sha256": None}
+    return {
+        "path": str(binary),
+        "size_bytes": stat.st_size,
+        "sha256": file_sha256(binary),
+    }
+
+
 def source_metadata() -> dict[str, Any]:
     workspace = Path(os.environ.get("BUILD_WORKSPACE_DIRECTORY", Path.cwd())).resolve()
     repositories = {
@@ -763,6 +800,7 @@ def result_document(args: argparse.Namespace, runs: list[dict[str, Any]]) -> dic
             "grpcio_version": grpc.__version__,
         },
         "source": source_metadata(),
+        "server_binary": server_binary_metadata(args.resolved_server_binary),
         "runs": runs,
     }
 
@@ -827,7 +865,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     stack: ManagedStack | None = None
     try:
         if args.manage_stack:
-            stack = ManagedStack(args.port)
+            stack = ManagedStack(args.port, args.server_binary)
+            args.resolved_server_binary = str(stack.server_binary.resolve())
             stack.start()
         return asyncio.run(run_load(args))
     except (RuntimeError, subprocess.CalledProcessError, asyncio.TimeoutError) as error:

@@ -131,6 +131,27 @@ class AcmeLoadTest(unittest.TestCase):
         self.assertEqual(args.channels, (1, 2, 4, 8))
         self.assertEqual(args.warmup, 0.25)
 
+    def test_server_binary_override_is_resolved_and_fingerprinted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory, "server")
+            binary.write_bytes(b"candidate-server")
+            binary.chmod(0o755)
+            args = acme_load.parse_args([
+                "--duration", "1",
+                "--warmup", "0",
+                "--concurrency", "1",
+                "--random-seed", "17",
+                "--server-binary", str(binary),
+            ])
+            self.assertEqual(args.server_binary, str(binary.resolve()))
+            args.resolved_server_binary = args.server_binary
+            metadata = acme_load.result_document(args, [])["server_binary"]
+        self.assertEqual(metadata["size_bytes"], len(b"candidate-server"))
+        self.assertEqual(
+            metadata["sha256"],
+            "c19a2d92eedae6fd582d76eaf4e0af30af5f0e7d7e4b0b4cbc8a2d47f0fca86b",
+        )
+
     def test_phase_document_separates_attempts_and_successes(self) -> None:
         results = acme_load.Results()
         results.attempted["get"] = 2
