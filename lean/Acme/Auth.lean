@@ -131,21 +131,72 @@ def TokenTable.Bound.lookup? (table : TokenTable.Bound α) (token : String) :
   table.entries.findSome? fun (configured, value) =>
     if configured == token then some value else none
 
+/-- Compare a configured token with the bytes after the ASCII `Bearer `
+prefix without copying those bytes into a new `String`.  The lookup computes
+the suffix byte length once and supplies the erased bound proof; each table
+entry needs only a length check followed by the runtime string `memcmp`. -/
+@[inline] private def configuredTokenMatchesHeader
+    (configured header : String) (suffixBytes : Nat)
+    (hsuffix : suffixBytes + 7 = header.utf8ByteSize) : Bool :=
+  if hlength : configured.utf8ByteSize = suffixBytes then
+    String.Slice.Pattern.Internal.memcmpStr configured header 0 ⟨7⟩
+      configured.rawEndPos
+      (by simp)
+      (by
+        simp only [String.Pos.Raw.le_iff, String.Pos.Raw.byteIdx_offsetBy,
+          String.byteIdx_rawEndPos]
+        omega)
+  else
+    false
+
+private def TokenTable.lookupBearerHeader? (table : TokenTable)
+    (header : String) : Option AuthenticatedPrincipal :=
+  if hsize : 7 ≤ header.utf8ByteSize then
+    let suffixBytes := header.utf8ByteSize - 7
+    have hsuffix : suffixBytes + 7 = header.utf8ByteSize := by omega
+    table.entries.findSome? fun (configured, principal) =>
+      if configuredTokenMatchesHeader configured header suffixBytes hsuffix then
+        some principal
+      else
+        none
+  else
+    none
+
+private def TokenTable.Bound.lookupBearerHeader? (table : TokenTable.Bound α)
+    (header : String) : Option α :=
+  if hsize : 7 ≤ header.utf8ByteSize then
+    let suffixBytes := header.utf8ByteSize - 7
+    have hsuffix : suffixBytes + 7 = header.utf8ByteSize := by omega
+    table.entries.findSome? fun (configured, value) =>
+      if configuredTokenMatchesHeader configured header suffixBytes hsuffix then
+        some value
+      else
+        none
+  else
+    none
+
 /-- Extract the token of an `authorization: Bearer <token>` header. -/
 def bearerToken? (metadata : Grpc.Metadata) : Option String :=
   match (metadata.getAll "authorization").back? with
   | some v => if v.startsWith "Bearer " then some (v.drop 7).toString else none
   | none => none
 
+/-- Select the same last bearer header as `bearerToken?`, but retain the
+original header so the authentication lookup can compare its suffix in place. -/
+private def bearerHeader? (metadata : Grpc.Metadata) : Option String :=
+  match (metadata.getAll "authorization").back? with
+  | some v => if v.startsWith "Bearer " then some v else none
+  | none => none
+
 /-- Authenticate headers directly to their startup-bound capability.  Header
 selection and rejection statuses deliberately match `TokenTable.authenticate`. -/
 def TokenTable.Bound.authenticate (table : TokenTable.Bound α)
     (metadata : Grpc.Metadata) : Except Grpc.Status α :=
-  match bearerToken? metadata with
+  match bearerHeader? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
-  | some token =>
-    match table.lookup? token with
+  | some header =>
+    match table.lookupBearerHeader? header with
     | some value => .ok value
     | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 
@@ -153,11 +204,11 @@ def TokenTable.Bound.authenticate (table : TokenTable.Bound α)
 UNAUTHENTICATED (gRPC: the caller could not be identified at all). -/
 def authenticate (table : TokenTable) (metadata : Grpc.Metadata) :
     Except Grpc.Status AuthenticatedPrincipal :=
-  match bearerToken? metadata with
+  match bearerHeader? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
-  | some token =>
-    match table.lookup? token with
+  | some header =>
+    match table.lookupBearerHeader? header with
     | some p => .ok p
     | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 

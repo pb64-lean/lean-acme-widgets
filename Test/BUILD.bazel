@@ -20,6 +20,23 @@ lean_test(
     ],
 )
 
+# Exact semantic differential for the allocation-free bearer-suffix lookup,
+# including last-header selection, malformed spacing, Unicode, embedded NUL,
+# and boundary lengths.
+lean_test(
+    name = "auth_suffix_test",
+    srcs = ["AuthSuffixTest.lean"],
+    deps = ["//lean/Acme:auth"],
+)
+
+# Opt-in auth-only copied-vs-borrowed suffix instruction-counter harness.
+lean_binary(
+    name = "auth_suffix_benchmark",
+    srcs = ["AuthSuffixBenchmark.lean"],
+    tags = ["manual"],
+    deps = ["//lean/Acme:auth"],
+)
+
 # Focused, opt-in page mapping benchmark. The row is validated once, outside
 # the timed loop, then the proof-directed projection is compared with the
 # former checked-Int mapping at page sizes 10 and 100.
