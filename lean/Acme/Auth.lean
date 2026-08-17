@@ -177,14 +177,14 @@ private def TokenTable.Bound.lookupBearerHeader? (table : TokenTable.Bound α)
 
 /-- Extract the token of an `authorization: Bearer <token>` header. -/
 def bearerToken? (metadata : Grpc.Metadata) : Option String :=
-  match (metadata.getAll "authorization").back? with
+  match metadata.getLast? "authorization" with
   | some v => if v.startsWith "Bearer " then some (v.drop 7).toString else none
   | none => none
 
 /-- Select the same last bearer header as `bearerToken?`, but retain the
 original header so the authentication lookup can compare its suffix in place. -/
 private def bearerHeader? (metadata : Grpc.Metadata) : Option String :=
-  match (metadata.getAll "authorization").back? with
+  match metadata.getLast? "authorization" with
   | some v => if v.startsWith "Bearer " then some v else none
   | none => none
 
