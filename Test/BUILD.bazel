@@ -66,14 +66,23 @@ lean_binary(
     deps = ["//lean/Acme:repo"],
 )
 
-# Opt-in comparison harness for row-owned PostgreSQL result spans. It starts
-# after framing, exercises production span decoding, grows the production
-# result-array shape, and invokes ListWidgets' generated prepared decoder over
-# fixed mixed-format and control batches.
+# Opt-in reference/candidate counter harness for proof-bounded row-owned span
+# decoding. It starts after framing, grows the production result-array shape,
+# and invokes the actual six-column ListWidgets prepared decoder.
 lean_binary(
     name = "row_owned_span_benchmark",
     srcs = ["RowOwnedSpanBenchmark.lean"],
     tags = ["manual"],
+    deps = [
+        "//db:acme_db",
+        "@pg_lean//Pg/Protocol:protocol",
+    ],
+)
+
+lean_test(
+    name = "row_owned_span_test",
+    srcs = ["RowOwnedSpanBenchmark.lean"],
+    args = ["candidate", "mixed_1", "1", "0"],
     deps = [
         "//db:acme_db",
         "@pg_lean//Pg/Protocol:protocol",
