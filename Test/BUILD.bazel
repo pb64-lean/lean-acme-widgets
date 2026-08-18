@@ -29,12 +29,31 @@ lean_test(
     deps = ["//lean/Acme:auth"],
 )
 
+# No-Pg regression for the installed startup-bound request authorizer: all
+# demo tokens × all WidgetService methods, exact auth failures/last-header
+# behavior, and non-Widget passthrough against the former rebuild shape.
+lean_test(
+    name = "dispatch_cache_test",
+    srcs = ["DispatchCacheTest.lean"],
+    deps = ["//lean/Acme:service"],
+)
+
 # Opt-in auth-only copied-vs-borrowed suffix instruction-counter harness.
 lean_binary(
     name = "auth_suffix_benchmark",
     srcs = ["AuthSuffixBenchmark.lean"],
     tags = ["manual"],
     deps = ["//lean/Acme:auth"],
+)
+
+# Opt-in no-Pg instruction-counter harness. `rebuild` retains the exact
+# former per-request TokenTable.bind shape; `prebound` installs the same
+# synthetic WidgetService registries once before the loop.
+lean_binary(
+    name = "dispatch_cache_benchmark",
+    srcs = ["DispatchCacheBenchmark.lean"],
+    tags = ["manual"],
+    deps = ["//lean/Acme:service"],
 )
 
 # Focused, opt-in page mapping benchmark. The row is validated once, outside

@@ -186,19 +186,14 @@ def unauthenticatedService : WidgetService :=
   { handleCreateWidget := deny, handleGetWidget := deny, handleListWidgets := deny,
     handleUpdateWidget := deny, handleDeleteWidget := deny }
 
-/--
-The pre-body authenticator. Runs at END_HEADERS, before any request DATA is
-accepted: WidgetService methods resolve the bearer token to an
-`AuthenticatedPrincipal` and return the accept-capability whose handler
-closes over it (shape-safely, via `MethodEntry.handlerFor?`); missing or
-unknown tokens are rejected with UNAUTHENTICATED while the request body is
-still unread. Non-WidgetService methods (server reflection, needed by
-`grpcurl` for discovery) stay open with their registered handlers.
--/
-def authorizer (repo : Repo.Repo) (table : Auth.TokenTable) :
+/-- Evaluation boundary for the request callback. Without both the opaque
+body and the explicit partial application at registry assembly, Lean can
+flatten the surrounding function's arity and sink `TokenTable.bind` back onto
+the request path while preserving all pure semantics. Keep the optimized-C
+and stable handler-identity gates when changing this boundary. -/
+@[noinline] private opaque authorizerFromDispatches
+    (dispatches : Auth.TokenTable.Bound Grpc.Registry) :
     Grpc.PureRequestHeaderAuthorizer :=
-  let dispatches := table.bind fun principal =>
-    WidgetService.register Grpc.Registry.empty (widgetService repo principal)
   fun entry metadata =>
     if entry.name.service != widgetServiceName then
       .acceptRegistered entry
@@ -214,10 +209,42 @@ def authorizer (repo : Repo.Repo) (table : Auth.TokenTable) :
           | some handler => .accept handler
           | none => .reject (Grpc.Status.internal "authorizer shape mismatch")
 
-def registry (repo : Repo.Repo) (table : Auth.TokenTable) : Grpc.Registry :=
+/--
+The pre-body authenticator. Its per-principal dispatch registries are built
+once while the server registry is assembled. At END_HEADERS, before any
+request DATA is accepted, WidgetService methods resolve the bearer token to an
+`AuthenticatedPrincipal` and return the accept-capability whose handler
+closes over it (shape-safely, via `MethodEntry.handlerFor?`); missing or
+unknown tokens are rejected with UNAUTHENTICATED while the request body is
+still unread. Non-WidgetService methods (server reflection, needed by
+`grpcurl` for discovery) stay open with their registered handlers.
+
+This factory keeps registry assembly independently testable without opening a
+database connection. It is invoked once per configured token, and its
+principal-bound handlers live in the resulting registry for the process
+lifetime.
+-/
+@[noinline] def registryWithServiceFactory (table : Auth.TokenTable)
+    (serviceFor : Auth.AuthenticatedPrincipal → WidgetService) : Grpc.Registry :=
   Grpc.Services.Reflection.register
     (WidgetService.register Grpc.Registry.empty unauthenticatedService)
-    |>.withPureRequestHeaderAuthorizer (authorizer repo table)
+    |>.withPureRequestHeaderAuthorizer
+      (authorizerFromDispatches <| table.bind fun principal =>
+        WidgetService.register Grpc.Registry.empty (serviceFor principal))
+
+def registry (repo : Repo.Repo) (table : Auth.TokenTable) : Grpc.Registry :=
+  registryWithServiceFactory table (widgetService repo)
+
+/-- Source-compatibility shim for callers that previously installed the
+callback themselves. Use `registry`: because this result is itself a
+function, Lean may defer this shim's pure binding work until callback
+invocation, whereas `registryWithServiceFactory` supplies the verified
+startup evaluation boundary. -/
+@[deprecated registry (since := "2026-08-17")]
+def authorizer (repo : Repo.Repo) (table : Auth.TokenTable) :
+    Grpc.PureRequestHeaderAuthorizer :=
+  authorizerFromDispatches <| table.bind fun principal =>
+    WidgetService.register Grpc.Registry.empty (widgetService repo principal)
 
 end Service
 end Acme
