@@ -66,9 +66,9 @@ lean_binary(
     deps = ["//lean/Acme:repo"],
 )
 
-# Opt-in counter harness for proof-bounded row-owned span decoding. It starts
-# after framing, grows the production result-array shape, and compares the
-# generated ListWidgets row-map and proof-backed batch decoders.
+# Opt-in counter harness for proof-bounded row-owned span decoding. It freezes
+# the exact generated ListWidgets batch callback across matching and fallback
+# format vectors at 0/1/55 rows.
 lean_binary(
     name = "row_owned_span_benchmark",
     srcs = ["RowOwnedSpanBenchmark.lean"],

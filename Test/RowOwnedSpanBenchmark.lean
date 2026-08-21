@@ -12,16 +12,17 @@ owned row-array shape as `Pg.Connection.foldExecute`, and only then invokes the
 selected prepared decoder.
 
 The `reference`/`candidate` pair retains the earlier checked-access comparison.
-The PGX-13 counter pair is `current_many`, which maps the generated row decoder,
-versus `batch_many`, which invokes the generated proof-backed batch callback
-and caches actual portal descriptors outside its row loop.  Untimed controls
-pin exact fields, runtime formats/OIDs, errors, and first-error order before the
-selected loop runs.
+The generated-batch comparison invokes the exact production `bundle.many`
+callback from separately frozen baseline and candidate binaries.  Matching,
+all-text fallback, and late-mismatch vectors at 0/1/55 rows distinguish fixed
+batch-selection work from row-scaled decoding.  Untimed controls pin exact
+fields, runtime formats/OIDs, errors, and first-error order before the selected
+loop runs.
 
 The executable is intended for whole-process deterministic counters.  Fixture
 construction, semantic controls, one task boundary, and the requested warmup
 are therefore part of process counters; only the fixed-iteration selected
-`mixed_1` or `mixed_55` loop scales with `iterations`.
+fixture loop scales with `iterations`.
 -/
 
 private abbrev Values := Array (Option ByteArray)
@@ -44,12 +45,19 @@ private inductive DecodeMode where
   | batchMany
 
 private inductive FixtureMode where
+  | mixed0
   | mixed1
   | mixed55
+  | text0
+  | text1
+  | text55
+  | late1
+  | late55
 
 private inductive WireMode where
   | mixed
   | allText
+  | lateMismatch
   deriving BEq
 
 private structure Fixture where
@@ -65,6 +73,7 @@ private structure Fixture where
 private def formats : WireMode → Array UInt16
   | .mixed => #[1, 1, 0, 0, 1, 0]
   | .allText => #[0, 0, 0, 0, 0, 0]
+  | .lateMismatch => #[1, 1, 0, 0, 1, 1]
 
 private def makeColumns (mode : WireMode) : Array Pg.Protocol.ColumnDesc :=
   let fs := formats mode
@@ -93,7 +102,7 @@ private def makeRow (index : Nat) : RowData :=
 
 private def encodeInt64 (mode : WireMode) (value : Int64) : ByteArray :=
   match mode with
-  | .mixed => Pg.putInt64BE value
+  | .mixed | .lateMismatch => Pg.putInt64BE value
   | .allText => (toString value).toUTF8
 
 private def wireValues (mode : WireMode) (row : RowData) : Values :=
@@ -431,6 +440,9 @@ private def batchSemanticCases : Array BatchSemanticCase :=
   let baseColumns := makeColumns .mixed
   let baseValues := wireValues .mixed expected
   let textValues := wireValues .allText expected
+  let noncanonicalColumns := baseColumns.set! 5 {
+    baseColumns[5]! with format := 2
+  }
   let success := BatchDecodeSnapshot.ok #[.ofRowData expected]
   let uuidBytes := ByteArray.mk #[
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
@@ -455,6 +467,12 @@ private def batchSemanticCases : Array BatchSemanticCase :=
       label := "all-text-runtime-formats"
       columns := makeColumns .allText
       messages := #[makeDataRow textValues]
+      expected := success
+    },
+    {
+      label := "noncanonical-text-format-fallback"
+      columns := noncanonicalColumns
+      messages := #[makeDataRow baseValues]
       expected := success
     },
     {
@@ -554,6 +572,16 @@ private def validateBatchSemanticParity
 private def formatVector (columns : Array Pg.Protocol.ColumnDesc) : String :=
   "[" ++ String.intercalate "," (columns.toList.map (toString ·.format)) ++ "]"
 
+/-- ListWidgets' three String fields use the generic binary-span fallback and
+therefore materialize an exact cell even when their runtime format is binary.
+Every text-format field materializes for UTF-8 validation as well. -/
+private def materializedCellsPerRow (columns : Array Pg.Protocol.ColumnDesc) : Nat :=
+  (Array.range columns.size).foldl (init := 0) fun count index =>
+    if columns[index]!.format != 1 || index == 2 || index == 3 || index == 5 then
+      count + 1
+    else
+      count
+
 private def runSelected (decode : @& PreparedBatchDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) (iterations warmup : Nat) : IO UInt64 := do
@@ -589,7 +617,8 @@ private def parseArgs (args : List String) : IO Options := do
     | _ => throw (IO.userError <|
         "usage: row_owned_span_benchmark " ++
           "(reference|candidate|current_many|batch_many) " ++
-          "(mixed_1|mixed_55) iterations warmup")
+          "(mixed_0|mixed_1|mixed_55|text_0|text_1|text_55|late_1|late_55) " ++
+          "iterations warmup")
   let mode ← match modeName with
     | "reference" => pure DecodeMode.reference
     | "candidate" => pure DecodeMode.candidate
@@ -598,17 +627,32 @@ private def parseArgs (args : List String) : IO Options := do
     | _ => throw (IO.userError
         "mode must be reference, candidate, current_many, or batch_many")
   let fixture ← match fixtureName with
+    | "mixed_0" => pure FixtureMode.mixed0
     | "mixed_1" => pure FixtureMode.mixed1
     | "mixed_55" => pure FixtureMode.mixed55
-    | _ => throw (IO.userError "fixture must be mixed_1 or mixed_55")
+    | "text_0" => pure FixtureMode.text0
+    | "text_1" => pure FixtureMode.text1
+    | "text_55" => pure FixtureMode.text55
+    | "late_1" => pure FixtureMode.late1
+    | "late_55" => pure FixtureMode.late55
+    | _ => throw (IO.userError <|
+        "fixture must be mixed_0, mixed_1, mixed_55, text_0, text_1, " ++
+          "text_55, late_1, or late_55")
   pure { mode, modeName, fixture, fixtureName, iterations, warmup }
 
 def main (args : List String) : IO Unit := do
   let options ← parseArgs args
   let expected55 := Array.ofFn (n := 55) (fun i => makeRow i)
+  let expected1 := expected55.extract 0 1
+  let expected0 := expected55.extract 0 0
+  let mixed0 := makeFixture "mixed_0" .mixed expected0
   let mixed55 := makeFixture "mixed_55" .mixed expected55
-  let mixed1 := makeFixture "mixed_1" .mixed (expected55.extract 0 1)
+  let mixed1 := makeFixture "mixed_1" .mixed expected1
+  let text0 := makeFixture "text_0" .allText expected0
+  let text1 := makeFixture "text_1" .allText expected1
   let text55 := makeFixture "all_text_55" .allText expected55
+  let late1 := makeFixture "late_1" .lateMismatch expected1
+  let late55 := makeFixture "late_55" .lateMismatch expected55
   let candidate ← match AcmeDb.Queries.ListWidgets.spec.preparedSpanDecode with
     | some decode => pure decode
     | none => throw (IO.userError "ListWidgets has no generated span decoder")
@@ -616,6 +660,8 @@ def main (args : List String) : IO Unit := do
     | some bundle => pure bundle
     | none => throw (IO.userError
         "ListWidgets has no generated prepared-span decoder bundle")
+  unless AcmeDb.Queries.ListWidgets.spec.resultFormats == formats .mixed do
+    throw (IO.userError "ListWidgets generated result-format vector changed")
   unless bundle.expectedColumns == 6 do
     throw (IO.userError "ListWidgets bundle expected-column count changed")
   -- `ListWidgets` consists entirely of planned built-ins, so its generated
@@ -628,7 +674,8 @@ def main (args : List String) : IO Unit := do
   let currentManyControl :=
     (selectDecoderBox .currentMany candidate bundle.many).decode
   validateEquivalence mixed55 text55
-  for fixture in #[mixed55, mixed1, text55] do
+  validateEquivalence mixed55 late55
+  for fixture in #[mixed0, mixed1, mixed55, text0, text1, text55, late1, late55] do
     validateFixture referenceDecode resolve types fixture
     validateFixture candidate resolve types fixture
     validateBatchFixture currentManyControl resolve types fixture
@@ -638,8 +685,14 @@ def main (args : List String) : IO Unit := do
   let decoderBox := selectDecoderBox options.mode candidate bundle.many
   let decode := decoderBox.decode
   let fixture := match options.fixture with
+    | .mixed0 => mixed0
     | .mixed1 => mixed1
     | .mixed55 => mixed55
+    | .text0 => text0
+    | .text1 => text1
+    | .text55 => text55
+    | .late1 => late1
+    | .late55 => late55
   -- Crossing a task boundary matches the multi-threaded ownership regime of
   -- the service. Whole-process counters also include the fixed setup above.
   let task ← IO.asTask
@@ -647,9 +700,8 @@ def main (args : List String) : IO Unit := do
   let checksum ← match ← IO.wait task with
   | .ok checksum => pure checksum
   | .error error => throw error
-  let materializedCellsPerRow := fixture.columns.foldl (fun count column =>
-    if column.format == 1 then count else count + 1) 0
-  IO.println <| s!"benchmark=row_owned_span_decode_v3 mode={options.modeName} " ++
+  let materializedPerRow := materializedCellsPerRow fixture.columns
+  IO.println <| s!"benchmark=row_owned_span_decode_v4 mode={options.modeName} " ++
     s!"case={options.fixtureName} iterations={options.iterations} warmup={options.warmup}"
   IO.println <| "counter_scope=whole_process " ++
     s!"row_semantic_cases={semanticCaseCount} " ++
@@ -659,8 +711,8 @@ def main (args : List String) : IO Unit := do
   IO.println "routing_scope=decoder_body callback_selected_once=true bundle_width_dispatch=excluded"
   IO.println <| s!"rows_per_iteration={fixture.expected.size} " ++
     s!"formats={formatVector fixture.columns} wire_payload_bytes={fixture.wirePayloadBytes} " ++
-    s!"materialized_cells_per_row={materializedCellsPerRow} " ++
-    s!"materialized_cells_per_batch={fixture.expected.size * materializedCellsPerRow}"
+    s!"materialized_cells_per_row={materializedPerRow} " ++
+    s!"materialized_cells_per_batch={fixture.expected.size * materializedPerRow}"
   IO.println <| s!"first_row_checksum={fixture.expectedFirstRowChecksum} " ++
     s!"last_row_checksum={fixture.expectedLastRowChecksum} " ++
     s!"batch_checksum={fixture.expectedBatchChecksum} measured_checksum={checksum}"
