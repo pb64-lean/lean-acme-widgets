@@ -66,9 +66,9 @@ lean_binary(
     deps = ["//lean/Acme:repo"],
 )
 
-# Opt-in reference/candidate counter harness for proof-bounded row-owned span
-# decoding. It starts after framing, grows the production result-array shape,
-# and invokes the actual six-column ListWidgets prepared decoder.
+# Opt-in counter harness for proof-bounded row-owned span decoding. It starts
+# after framing, grows the production result-array shape, and compares the
+# generated ListWidgets row-map and proof-backed batch decoders.
 lean_binary(
     name = "row_owned_span_benchmark",
     srcs = ["RowOwnedSpanBenchmark.lean"],
@@ -82,7 +82,7 @@ lean_binary(
 lean_test(
     name = "row_owned_span_test",
     srcs = ["RowOwnedSpanBenchmark.lean"],
-    args = ["candidate", "mixed_1", "1", "0"],
+    args = ["batch_many", "mixed_1", "1", "0"],
     deps = [
         "//db:acme_db",
         "@pg_lean//Pg/Protocol:protocol",

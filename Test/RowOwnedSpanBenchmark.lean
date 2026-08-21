@@ -11,11 +11,12 @@ iteration runs the production `Backend.decodeDataRowSpans`, grows the same
 owned row-array shape as `Pg.Connection.foldExecute`, and only then invokes the
 selected prepared decoder.
 
-The `reference` mode reproduces the former generated six-built-in decoder:
-ordered arity guards followed by checked column and span lookups.  The
-`candidate` mode invokes the actual generated `ListWidgets` decoder, whose
-arity proofs drive proof-indexed column and span access.  Untimed controls pin
-exact fields, errors, and first-error order before the selected loop runs.
+The `reference`/`candidate` pair retains the earlier checked-access comparison.
+The PGX-13 counter pair is `current_many`, which maps the generated row decoder,
+versus `batch_many`, which invokes the generated proof-backed batch callback
+and caches actual portal descriptors outside its row loop.  Untimed controls
+pin exact fields, runtime formats/OIDs, errors, and first-error order before the
+selected loop runs.
 
 The executable is intended for whole-process deterministic counters.  Fixture
 construction, semantic controls, one task boundary, and the requested warmup
@@ -31,9 +32,16 @@ private abbrev PreparedDecoder :=
   Pgx.Typed.TypeResolver → Array Pgx.Typed.ResolvedType →
     Array Pg.Protocol.ColumnDesc → Pg.Protocol.DataRowSpans → Except Pgx.Typed.Error Row
 
+private abbrev PreparedBatchDecoder :=
+  Pgx.Typed.TypeResolver → Array Pgx.Typed.ResolvedType →
+    Array Pg.Protocol.ColumnDesc → Array Pg.Protocol.DataRowSpans →
+      Except Pgx.Typed.Error (Array Row)
+
 private inductive DecodeMode where
   | reference
   | candidate
+  | currentMany
+  | batchMany
 
 private inductive FixtureMode where
   | mixed1
@@ -162,17 +170,42 @@ as the stable compatibility oracle for both semantic and counter comparisons. -/
   | .error violation => throw (Pgx.Typed.Error.constraintViolation violation)
 
 private structure DecoderBox where
-  decode : PreparedDecoder
+  decode : PreparedBatchDecoder
   /-- Keep the selection result boxed across the opaque boundary. -/
   candidateSelected : Bool
 
-/-- Select the decoder once without letting function-return eta expansion give
-either mode a different per-row call shape inside the counter loop. -/
+@[noinline] private def decodeCurrentMany (decode : @& PreparedDecoder)
+    (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
+    (columns : @& Array Pg.Protocol.ColumnDesc)
+    (rows : @& Array Pg.Protocol.DataRowSpans) : Except Pgx.Typed.Error (Array Row) :=
+  rows.mapM fun values => do
+    unless values.size == 6 do
+      throw (.queryDrift s!"data row has {values.size} fields; expected 6")
+    decode resolve types columns values
+
+/-- Select one complete batch decoder outside the measured loop. -/
 @[noinline] private opaque selectDecoderBox
-    (mode : DecodeMode) (candidate : PreparedDecoder) : DecoderBox :=
+    (mode : DecodeMode) (candidate : PreparedDecoder)
+    (batchCandidate : PreparedBatchDecoder) : DecoderBox :=
   match mode with
-  | .reference => { decode := referenceDecode, candidateSelected := false }
-  | .candidate => { decode := candidate, candidateSelected := true }
+  | .reference => {
+      decode := fun resolve types columns rows =>
+        rows.mapM (referenceDecode resolve types columns)
+      candidateSelected := false
+    }
+  | .candidate => {
+      decode := fun resolve types columns rows =>
+        rows.mapM (candidate resolve types columns)
+      candidateSelected := true
+    }
+  | .currentMany => {
+      decode := decodeCurrentMany candidate
+      candidateSelected := true
+    }
+  | .batchMany => {
+      decode := batchCandidate
+      candidateSelected := true
+    }
 
 /-- This is intentionally the same initially-empty, push-grown result shape
 used by `Pg.Connection.foldExecute`; preallocating it would hide part of the
@@ -186,13 +219,13 @@ production ownership path selected for this experiment. -/
     | .error error => throw error
   pure rows
 
-@[noinline] private def decodeSpanRows (decode : @& PreparedDecoder)
+@[noinline] private def decodeSpanRows (decode : @& PreparedBatchDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (columns : @& Array Pg.Protocol.ColumnDesc) (rows : @& Array Pg.Protocol.DataRowSpans) :
     Except Pgx.Typed.Error (Array Row) :=
-  rows.mapM (decode resolve types columns)
+  decode resolve types columns rows
 
-private def retainAndDecode (decode : @& PreparedDecoder)
+private def retainAndDecode (decode : @& PreparedBatchDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) : Except String (Array Row) := do
   let rows ← retainSpanRows fixture.messages
@@ -200,7 +233,7 @@ private def retainAndDecode (decode : @& PreparedDecoder)
   | .ok rows => pure rows
   | .error error => throw error.toMessage
 
-@[noinline] private def runIterations (decode : @& PreparedDecoder)
+@[noinline] private def runIterations (decode : @& PreparedBatchDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) (iterations : Nat) : IO UInt64 := do
   let mut checksum : UInt64 := 0
@@ -224,7 +257,9 @@ private def validateRows (label : String) (actual : Array Row)
 private def validateFixture (decode : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) : IO Unit := do
-  let rows ← match retainAndDecode decode resolve types fixture with
+  let decodeRows : PreparedBatchDecoder := fun resolve types columns rows =>
+    rows.mapM (decode resolve types columns)
+  let rows ← match retainAndDecode decodeRows resolve types fixture with
     | .ok rows => pure rows
     | .error error => throw (IO.userError s!"{fixture.label}: {error}")
   validateRows fixture.label rows fixture.expected
@@ -232,6 +267,19 @@ private def validateFixture (decode : @& PreparedDecoder)
   unless actualChecksum == fixture.expectedBatchChecksum do
     throw (IO.userError
       s!"{fixture.label}: batch checksum {actualChecksum} != {fixture.expectedBatchChecksum}")
+
+private def validateBatchFixture (decode : @& PreparedBatchDecoder)
+    (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
+    (fixture : @& Fixture) : IO Unit := do
+  let rows ← match retainAndDecode decode resolve types fixture with
+    | .ok rows => pure rows
+    | .error error => throw (IO.userError s!"{fixture.label}: generated batch: {error}")
+  validateRows (fixture.label ++ " generated batch") rows fixture.expected
+  let actualChecksum := rows.foldl (fun total row => total + rowChecksum row.val) 0
+  unless actualChecksum == fixture.expectedBatchChecksum do
+    throw (IO.userError <|
+      s!"{fixture.label}: generated batch checksum {actualChecksum} != " ++
+        s!"{fixture.expectedBatchChecksum}")
 
 private def validateEquivalence (mixed text : @& Fixture) : IO Unit := do
   unless mixed.expected.size == text.expected.size do
@@ -265,6 +313,11 @@ private inductive DecodeSnapshot where
   | error (kind : Pgx.Typed.ErrorKind) (message : String)
   deriving Repr, BEq
 
+private inductive BatchDecodeSnapshot where
+  | ok (rows : Array RowSnapshot)
+  | error (kind : Pgx.Typed.ErrorKind) (message : String)
+  deriving Repr, BEq
+
 private structure SemanticCase where
   label : String
   columns : Array Pg.Protocol.ColumnDesc
@@ -283,6 +336,15 @@ private def snapshotDecode (decode : @& PreparedDecoder)
   let values ← Pg.Protocol.Backend.decodeDataRowSpans fixture.message
   match decode resolve types fixture.columns values with
   | .ok row => pure (.ok (.ofRowData row.val))
+  | .error error => pure (.error error.kind error.toMessage)
+
+private def snapshotBatchDecode (decode : @& PreparedBatchDecoder)
+    (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
+    (columns : @& Array Pg.Protocol.ColumnDesc)
+    (messages : @& Array Pg.Protocol.RawMessage) : Except String BatchDecodeSnapshot := do
+  let rows ← retainSpanRows messages
+  match decode resolve types columns rows with
+  | .ok decoded => pure (.ok <| decoded.map fun row => RowSnapshot.ofRowData row.val)
   | .error error => pure (.error error.kind error.toMessage)
 
 private def semanticCases : Array SemanticCase :=
@@ -358,6 +420,92 @@ private def semanticCases : Array SemanticCase :=
     }
   ]
 
+private structure BatchSemanticCase where
+  label : String
+  columns : Array Pg.Protocol.ColumnDesc
+  messages : Array Pg.Protocol.RawMessage
+  expected : BatchDecodeSnapshot
+
+private def batchSemanticCases : Array BatchSemanticCase :=
+  let expected := makeRow 0
+  let baseColumns := makeColumns .mixed
+  let baseValues := wireValues .mixed expected
+  let textValues := wireValues .allText expected
+  let success := BatchDecodeSnapshot.ok #[.ofRowData expected]
+  let uuidBytes := ByteArray.mk #[
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
+  ]
+  let uuidColumns := baseColumns.set! 2 {
+    baseColumns[2]! with typeOid := Pg.Oid.uuid, format := 1
+  }
+  let uuidExpected := {
+    expected with name := "00112233-4455-6677-8899-aabbccddeeff"
+  }
+  let shortRow := makeDataRow (baseValues.extract 0 5)
+  let malformedFirst := makeDataRow (baseValues.set! 0 (some (ByteArray.mk #[0xff])))
+  #[
+    {
+      label := "mixed-success"
+      columns := baseColumns
+      messages := #[makeDataRow baseValues]
+      expected := success
+    },
+    {
+      label := "all-text-runtime-formats"
+      columns := makeColumns .allText
+      messages := #[makeDataRow textValues]
+      expected := success
+    },
+    {
+      label := "runtime-uuid-oid"
+      columns := uuidColumns
+      messages := #[makeDataRow (baseValues.set! 2 (some uuidBytes))]
+      expected := .ok #[.ofRowData uuidExpected]
+    },
+    {
+      label := "bad-columns-empty-batch"
+      columns := baseColumns.extract 0 5
+      messages := #[]
+      expected := .ok #[]
+    },
+    {
+      label := "bad-columns-malformed-first-row"
+      columns := baseColumns.extract 0 5
+      messages := #[shortRow]
+      expected := .error .queryDrift
+        "query drift: data row has 5 fields; expected 6"
+    },
+    {
+      label := "bad-columns-valid-first-row"
+      columns := baseColumns.extract 0 5
+      messages := #[makeDataRow baseValues]
+      expected := .error .queryDrift
+        "query drift: generated decoder expected 6 column descriptors"
+    },
+    {
+      label := "later-malformed-row"
+      columns := baseColumns
+      messages := #[makeDataRow baseValues, shortRow]
+      expected := .error .queryDrift
+        "query drift: data row has 5 fields; expected 6"
+    },
+    {
+      label := "earlier-decode-error-precedes-later-arity"
+      columns := baseColumns
+      messages := #[malformedFirst, shortRow]
+      expected := .error .decode "row decoding failed: unexpected integer width 1"
+    },
+    {
+      label := "leftmost-field-error"
+      columns := baseColumns
+      messages := #[makeDataRow <|
+        (baseValues.set! 0 (some (ByteArray.mk #[0xff]))).set! 2
+          (some (ByteArray.mk #[0xff]))]
+      expected := .error .decode "row decoding failed: unexpected integer width 1"
+    }
+  ]
+
 private def validateSemanticParity (candidate : @& PreparedDecoder)
     (resolve : @& Pgx.Typed.TypeResolver)
     (types : @& Array Pgx.Typed.ResolvedType) : IO Nat := do
@@ -378,10 +526,35 @@ private def validateSemanticParity (candidate : @& PreparedDecoder)
       throw (IO.userError s!"{fixture.label}: reference and candidate differ")
   pure semanticCases.size
 
+private def validateBatchSemanticParity
+    (bundle : @& Pgx.Typed.PreparedSpanDecoderBundle Row)
+    (resolve : @& Pgx.Typed.TypeResolver)
+    (types : @& Array Pgx.Typed.ResolvedType) : IO Nat := do
+  let guarded : PreparedBatchDecoder :=
+    Pgx.Typed.guardedPreparedSpanRows bundle.expectedColumns bundle.row
+  for fixture in batchSemanticCases do
+    let candidate ← match snapshotBatchDecode bundle.many resolve types
+        fixture.columns fixture.messages with
+      | .ok result => pure result
+      | .error error => throw (IO.userError s!"{fixture.label}: batch setup: {error}")
+    let reference ← match snapshotBatchDecode guarded resolve types
+        fixture.columns fixture.messages with
+      | .ok result => pure result
+      | .error error => throw (IO.userError s!"{fixture.label}: guarded setup: {error}")
+    unless reference == fixture.expected do
+      throw (IO.userError
+        s!"{fixture.label}: guarded decoder differs from expected: {reprStr reference}")
+    unless candidate == fixture.expected do
+      throw (IO.userError
+        s!"{fixture.label}: batch decoder differs from expected: {reprStr candidate}")
+    unless reference == candidate do
+      throw (IO.userError s!"{fixture.label}: guarded and batch decoders differ")
+  pure batchSemanticCases.size
+
 private def formatVector (columns : Array Pg.Protocol.ColumnDesc) : String :=
   "[" ++ String.intercalate "," (columns.toList.map (toString ·.format)) ++ "]"
 
-private def runSelected (decode : @& PreparedDecoder)
+private def runSelected (decode : @& PreparedBatchDecoder)
     (resolve : @& Pgx.Typed.TypeResolver) (types : @& Array Pgx.Typed.ResolvedType)
     (fixture : @& Fixture) (iterations warmup : Nat) : IO UInt64 := do
   let warmupChecksum ← runIterations decode resolve types fixture warmup
@@ -415,11 +588,15 @@ private def parseArgs (args : List String) : IO Options := do
         ← parseNatural "warmup" warmup)
     | _ => throw (IO.userError <|
         "usage: row_owned_span_benchmark " ++
-          "(reference|candidate) (mixed_1|mixed_55) iterations warmup")
+          "(reference|candidate|current_many|batch_many) " ++
+          "(mixed_1|mixed_55) iterations warmup")
   let mode ← match modeName with
     | "reference" => pure DecodeMode.reference
     | "candidate" => pure DecodeMode.candidate
-    | _ => throw (IO.userError "mode must be reference or candidate")
+    | "current_many" => pure DecodeMode.currentMany
+    | "batch_many" => pure DecodeMode.batchMany
+    | _ => throw (IO.userError
+        "mode must be reference, candidate, current_many, or batch_many")
   let fixture ← match fixtureName with
     | "mixed_1" => pure FixtureMode.mixed1
     | "mixed_55" => pure FixtureMode.mixed55
@@ -435,6 +612,12 @@ def main (args : List String) : IO Unit := do
   let candidate ← match AcmeDb.Queries.ListWidgets.spec.preparedSpanDecode with
     | some decode => pure decode
     | none => throw (IO.userError "ListWidgets has no generated span decoder")
+  let bundle ← match AcmeDb.Queries.ListWidgets.spec.preparedSpanDecoderBundle with
+    | some bundle => pure bundle
+    | none => throw (IO.userError
+        "ListWidgets has no generated prepared-span decoder bundle")
+  unless bundle.expectedColumns == 6 do
+    throw (IO.userError "ListWidgets bundle expected-column count changed")
   -- `ListWidgets` consists entirely of planned built-ins, so its generated
   -- decoder intentionally ignores the resolver/type array and dispatches from
   -- the already-validated physical ColumnDesc OID/format pair.  A fail-closed
@@ -442,12 +625,17 @@ def main (args : List String) : IO Unit := do
   let resolve : Pgx.Typed.TypeResolver := fun key =>
     throw (.queryDrift s!"benchmark did not resolve unexpected nested type {repr key}")
   let types : Array Pgx.Typed.ResolvedType := #[]
+  let currentManyControl :=
+    (selectDecoderBox .currentMany candidate bundle.many).decode
   validateEquivalence mixed55 text55
   for fixture in #[mixed55, mixed1, text55] do
     validateFixture referenceDecode resolve types fixture
     validateFixture candidate resolve types fixture
+    validateBatchFixture currentManyControl resolve types fixture
+    validateBatchFixture bundle.many resolve types fixture
   let semanticCaseCount ← validateSemanticParity candidate resolve types
-  let decoderBox := selectDecoderBox options.mode candidate
+  let batchSemanticCaseCount ← validateBatchSemanticParity bundle resolve types
+  let decoderBox := selectDecoderBox options.mode candidate bundle.many
   let decode := decoderBox.decode
   let fixture := match options.fixture with
     | .mixed1 => mixed1
@@ -461,11 +649,14 @@ def main (args : List String) : IO Unit := do
   | .error error => throw error
   let materializedCellsPerRow := fixture.columns.foldl (fun count column =>
     if column.format == 1 then count else count + 1) 0
-  IO.println <| s!"benchmark=row_owned_span_decode_v2 mode={options.modeName} " ++
+  IO.println <| s!"benchmark=row_owned_span_decode_v3 mode={options.modeName} " ++
     s!"case={options.fixtureName} iterations={options.iterations} warmup={options.warmup}"
   IO.println <| "counter_scope=whole_process " ++
-    s!"semantic_cases={semanticCaseCount} success_controls=reference,candidate " ++
+    s!"row_semantic_cases={semanticCaseCount} " ++
+    s!"batch_semantic_cases={batchSemanticCaseCount} " ++
+    "success_controls=reference,candidate,current_many,generated_batch " ++
     "task_boundary=one measured_loop=retain_spans,decode_six_fields,validate,consume"
+  IO.println "routing_scope=decoder_body callback_selected_once=true bundle_width_dispatch=excluded"
   IO.println <| s!"rows_per_iteration={fixture.expected.size} " ++
     s!"formats={formatVector fixture.columns} wire_payload_bytes={fixture.wirePayloadBytes} " ++
     s!"materialized_cells_per_row={materializedCellsPerRow} " ++
