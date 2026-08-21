@@ -35,7 +35,6 @@ require «lentil» from "../lentil"
 lean_lib «AcmeLeanGenerated» where
   srcDir := "bazel-bin/proto"
   roots := #[
-    `AcmeLean.authz,
     `AcmeLean.service,
     `AcmeLean.user,
     `AcmeLean.widgets,
@@ -44,7 +43,6 @@ lean_lib «AcmeLeanGenerated» where
 lean_lib «AcmeValidGenerated» where
   srcDir := "bazel-bin/proto"
   roots := #[
-    `AcmeValid.authz,
     `AcmeValid.service,
     `AcmeValid.user,
     `AcmeValid.widgets,

@@ -2,12 +2,10 @@ module
 
 public import AcmeDb
 public import AcmeLean.widgets
-public import AcmeLean.authz
 public import AcmeValid.widgets
-public import AcmeValid.authz
-public import Acme.Auth
+public import AcmeValid.service
 import all AcmeValid.widgets
-import all AcmeValid.authz
+import all Pb64AuthzValid.principal
 import Pg
 
 public section
@@ -21,13 +19,12 @@ open acme.v1
 Widget persistence through lean-pgx generated checked runners over pg-lean,
 behind a capability-typed boundary.
 
-Every mutating/reading repository function takes a per-operation
-`Authorized*` capability: a structure carrying the validated request, the
-`Auth.AuthenticatedPrincipal`, and the policy propositions — extracted from
-the generated `AcmeValid.Checked*` proofs plus the `Auth.Bound` binding
-check by the `authorize*` smart constructors below. Evidence therefore
-crosses the repository boundary intact and is erased only when a capability
-is projected into a generated query's typed `Params` value.
+Every repository function takes the generated per-method `WidgetService.*Call`
+capability. Its private constructor is reached only through generated service
+registration after pre-body authentication, request validation, and method
+policy validation. Evidence therefore crosses the repository boundary without
+a consumer-defined authorization wrapper or binding check and is erased only
+when projected into a generated query's typed `Params` value.
 
 One checked lean-pgx connection per repository. `open'` attaches the generated
 database contract to a raw `Pg.Connection`; generated runners then prepare,
@@ -39,170 +36,40 @@ across handler tasks.
 structure Repo where
   conn : Pgx.Typed.CheckedConnection AcmeDb.database
 
--- ── capabilities ──────────────────────────────────────────────────────────
+-- ── generated capability consequences ─────────────────────────────────────
 
-/-- Capability to create `request.widget` on behalf of `principal`:
-the widget is owned by the *authenticated* caller, who is at least editor. -/
-structure AuthorizedCreate where
-  principal : Auth.AuthenticatedPrincipal
-  request : Valid.CreateWidgetRequest
-  owner_eq : request.widget.toBase.owner_id = principal.id
-  editor : 2 ≤ principal.roleLevel
+/-- The shared validated Principal's positive-id refinement, projected through
+its generated base-message view. -/
+theorem principalIdPositive (principal : pb64.authz.v1.Valid.Principal) :
+    0 < principal.toBase.id := by
+  change 0 < principal.id.val
+  exact principal.id.property
 
-/-- Capability to read a widget: any authenticated principal may read
-(`principal.role_ge` already certifies role_level ≥ 1). -/
-structure AuthorizedGet where
-  principal : Auth.AuthenticatedPrincipal
-  request : Valid.GetWidgetRequest
+/-- The plain request's ownership rule and the generated method policy combine
+to tie the inserted widget to the authenticated principal. -/
+theorem createOwnerEq
+    (call : Valid.WidgetService.CreateWidgetCall) :
+    call.request.widget.toBase.owner_id = call.principal.toBase.id :=
+  calc call.request.widget.toBase.owner_id
+      = call.request.user_id.val :=
+        call.request.create_owner_matches.resolve_left (fun hc => hc rfl)
+    _ = call.request.toBase.user_id := rfl
+    _ = call.principal.toBase.id := call.policy.authz_create_self.symm
 
-/-- Capability to list `request.user_id`'s widgets: the authenticated caller
-is that user, or an admin. -/
-structure AuthorizedList where
-  principal : Auth.AuthenticatedPrincipal
-  request : Valid.ListWidgetsRequest
-  self_or_admin : principal.roleLevel = 3 ∨ principal.id = request.user_id.val
+/-- The corresponding ownership consequence for updates. -/
+theorem updateOwnerEq
+    (call : Valid.WidgetService.UpdateWidgetCall) :
+    call.request.widget.toBase.owner_id = call.principal.toBase.id :=
+  calc call.request.widget.toBase.owner_id
+      = call.request.user_id.val :=
+        call.request.update_owner_matches.resolve_left (fun hc => hc rfl)
+    _ = call.request.toBase.user_id := rfl
+    _ = call.principal.toBase.id := call.policy.authz_update_self.symm
 
-/-- Capability to update `request.widget`: the widget is owned by the
-authenticated caller, who is at least editor, and carries its id. -/
-structure AuthorizedUpdate where
-  principal : Auth.AuthenticatedPrincipal
-  request : Valid.UpdateWidgetRequest
-  owner_eq : request.widget.toBase.owner_id = principal.id
-  editor : 2 ≤ principal.roleLevel
-  has_id : 0 < request.widget.toBase.id
-
-/-- Capability to delete widget `request.widget_id` of owner
-`request.user_id`: the authenticated caller is that owner, or an admin. -/
-structure AuthorizedDelete where
-  principal : Auth.AuthenticatedPrincipal
-  request : Valid.DeleteWidgetRequest
-  self_or_admin : principal.roleLevel = 3 ∨ principal.id = request.user_id.val
-
--- ── proposition transport: generated Checked* proofs + Bound ⇒ capability ──
-
-private theorem create_owner_eq (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedCreateWidgetRequest) (hb : Auth.Bound p v.principal) :
-    v.request.widget.toBase.owner_id = p.id :=
-  calc v.request.widget.toBase.owner_id
-      = v.request.user_id.val := v.request.create_owner_matches.resolve_left (fun hc => hc rfl)
-    _ = v.request.toBase.user_id := rfl
-    _ = v.principal.toBase.id := v.authz_create_self.symm
-    _ = p.id := hb.1
-
-private theorem create_editor (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedCreateWidgetRequest) (hb : Auth.Bound p v.principal) :
-    2 ≤ p.roleLevel :=
-  hb.2 ▸ v.authz_create_editor
-
-private theorem list_self_or_admin (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedListWidgetsRequest) (hb : Auth.Bound p v.principal) :
-    p.roleLevel = 3 ∨ p.id = v.request.user_id.val := by
-  cases v.authz_list_self_or_admin with
-  | inl hrole => rw [hb.2] at hrole; exact .inl hrole
-  | inr hid =>
-    rw [hb.1] at hid
-    exact .inr (hid.trans (rfl : v.request.toBase.user_id = v.request.user_id.val))
-
-private theorem update_owner_eq (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedUpdateWidgetRequest) (hb : Auth.Bound p v.principal) :
-    v.request.widget.toBase.owner_id = p.id :=
-  calc v.request.widget.toBase.owner_id
-      = v.request.user_id.val := v.request.update_owner_matches.resolve_left (fun hc => hc rfl)
-    _ = v.request.toBase.user_id := rfl
-    _ = v.principal.toBase.id := v.authz_update_self.symm
-    _ = p.id := hb.1
-
-private theorem update_editor (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedUpdateWidgetRequest) (hb : Auth.Bound p v.principal) :
-    2 ≤ p.roleLevel :=
-  hb.2 ▸ v.authz_update_editor
-
-private theorem update_has_id (v : Valid.CheckedUpdateWidgetRequest) :
-    0 < v.request.widget.toBase.id :=
-  v.request.update_has_id.resolve_left (fun hc => hc rfl)
-
-private theorem delete_self_or_admin (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedDeleteWidgetRequest) (hb : Auth.Bound p v.principal) :
-    p.roleLevel = 3 ∨ p.id = v.request.user_id.val := by
-  cases v.authz_delete_self_or_admin with
-  | inl hrole => rw [hb.2] at hrole; exact .inl hrole
-  | inr hid =>
-    rw [hb.1] at hid
-    exact .inr (hid.trans (rfl : v.request.toBase.user_id = v.request.user_id.val))
-
--- ── smart constructors: the only runtime check is the binding decision ─────
-
-/-- Authorize a create for the authenticated `p`: succeeds iff the wire
-principal is bound to `p`; the policy propositions are *transported*, not
-re-checked. -/
-def authorizeCreate (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedCreateWidgetRequest) : Option AuthorizedCreate :=
-  if hb : Auth.Bound p v.principal then
-    some { principal := p, request := v.request,
-           owner_eq := create_owner_eq p v hb, editor := create_editor p v hb }
-  else none
-
-def authorizeGet (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedGetWidgetRequest) : Option AuthorizedGet :=
-  if _hb : Auth.Bound p v.principal then
-    some { principal := p, request := v.request }
-  else none
-
-def authorizeList (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedListWidgetsRequest) : Option AuthorizedList :=
-  if hb : Auth.Bound p v.principal then
-    some { principal := p, request := v.request,
-           self_or_admin := list_self_or_admin p v hb }
-  else none
-
-def authorizeUpdate (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedUpdateWidgetRequest) : Option AuthorizedUpdate :=
-  if hb : Auth.Bound p v.principal then
-    some { principal := p, request := v.request,
-           owner_eq := update_owner_eq p v hb, editor := update_editor p v hb,
-           has_id := update_has_id v }
-  else none
-
-def authorizeDelete (p : Auth.AuthenticatedPrincipal)
-    (v : Valid.CheckedDeleteWidgetRequest) : Option AuthorizedDelete :=
-  if hb : Auth.Bound p v.principal then
-    some { principal := p, request := v.request,
-           self_or_admin := delete_self_or_admin p v hb }
-  else none
-
--- ── soundness: authorization success carries exactly the claimed evidence ──
-
-/-- Possessing an `AuthorizedCreate` *is* possession of the policy: the
-created widget belongs to the authenticated principal, who is an editor. -/
-theorem AuthorizedCreate.sound (cap : AuthorizedCreate) :
-    cap.request.widget.toBase.owner_id = cap.principal.id ∧
-      2 ≤ cap.principal.roleLevel :=
-  ⟨cap.owner_eq, cap.editor⟩
-
-/-- `authorizeCreate` succeeding yields a capability for exactly the
-authenticated principal and the validated request, whose propositions hold
-for that principal — authorization by construction. -/
-theorem authorizeCreate_sound {p : Auth.AuthenticatedPrincipal}
-    {v : Valid.CheckedCreateWidgetRequest} {cap : AuthorizedCreate}
-    (h : authorizeCreate p v = some cap) :
-    cap.principal = p ∧ cap.request = v.request ∧
-      v.request.widget.toBase.owner_id = p.id ∧ 2 ≤ p.roleLevel := by
-  unfold authorizeCreate at h
-  split at h
-  next hb =>
-    injection h with h
-    subst h
-    exact ⟨rfl, rfl, create_owner_eq p v hb, create_editor p v hb⟩
-  next => simp at h
-
-/-- `authorizeCreate` fails only on a genuine binding mismatch. -/
-theorem authorizeCreate_none {p : Auth.AuthenticatedPrincipal}
-    {v : Valid.CheckedCreateWidgetRequest}
-    (h : authorizeCreate p v = none) : ¬ Auth.Bound p v.principal := by
-  unfold authorizeCreate at h
-  split at h
-  next => simp at h
-  next hb => exact hb
+theorem updateHasId
+    (call : Valid.WidgetService.UpdateWidgetCall) :
+    0 < call.request.widget.toBase.id :=
+  call.request.update_has_id.resolve_left (fun hc => hc rfl)
 
 -- ── checked PostgreSQL/protobuf numeric conversions ──────────────────────
 
@@ -343,9 +210,10 @@ uses the list query's own proof accessors rather than widening back to `Int`. -/
     quantity := AcmeDb.Queries.ListWidgets.quantityUInt32 row
     description := row.val.description }
 
-/-- Insert the capability's widget; returns the database-assigned id.
-`cap.owner_eq` proves the serialized owner is the authenticated principal. -/
-def insertWidget (repo : Repo) (cap : AuthorizedCreate) : IO (Except Error UInt64) := do
+/-- Insert the generated call's widget; returns the database-assigned id.
+`createOwnerEq` proves the serialized owner is the authenticated principal. -/
+def insertWidget (repo : Repo) (cap : Valid.WidgetService.CreateWidgetCall) :
+    IO (Except Error UInt64) := do
   let w := cap.request.widget.toBase
   let ownerId ← match inputInt64 "widgets.owner_id" w.owner_id with
     | .ok value => pure value
@@ -361,7 +229,8 @@ def insertWidget (repo : Repo) (cap : AuthorizedCreate) : IO (Except Error UInt6
   | .ok row =>
     pure <| (uint64OfInt "widgets.id" row.val.id.toInt).mapError .conversion
 
-def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Widget)) := do
+def getWidget (repo : Repo) (cap : Valid.WidgetService.GetWidgetCall) :
+    IO (Except Error (Option Widget)) := do
   let widgetId ← match inputInt64 "widgets.id" cap.request.widget_id.val with
     | .ok value => pure value
     | .error error => return .error error
@@ -370,9 +239,11 @@ def getWidget (repo : Repo) (cap : AuthorizedGet) : IO (Except Error (Option Wid
   | .ok none => pure (.ok none)
   | .ok (some row) => pure (.ok (some (widgetFromGetRow row)))
 
-/-- List the capability's user's widgets; `cap.self_or_admin` proves the
-listed owner is the authenticated principal, or the principal is admin. -/
-def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array Widget)) := do
+/-- List the capability's user's widgets;
+`cap.policy.authz_list_self_or_admin` proves the listed owner is the
+authenticated principal, or the principal is admin. -/
+def listWidgets (repo : Repo) (cap : Valid.WidgetService.ListWidgetsCall) :
+    IO (Except Error (Array Widget)) := do
   let ownerId ← match inputInt64 "widgets.owner_id" cap.request.user_id.val with
     | .ok value => pure value
     | .error error => return .error error
@@ -382,9 +253,10 @@ def listWidgets (repo : Repo) (cap : AuthorizedList) : IO (Except Error (Array W
   | .ok rows => pure (.ok (rows.map widgetFromListRow))
 
 /-- Update by (id, owner); `false` when no such widget belongs to the owner.
-`cap.owner_eq` proves the owner in the WHERE clause is the authenticated
-principal, `cap.has_id` that the id predicate is non-degenerate. -/
-def updateWidget (repo : Repo) (cap : AuthorizedUpdate) : IO (Except Error Bool) := do
+`updateOwnerEq` proves the owner in the WHERE clause is the authenticated
+principal, `updateHasId` that the id predicate is non-degenerate. -/
+def updateWidget (repo : Repo) (cap : Valid.WidgetService.UpdateWidgetCall) :
+    IO (Except Error Bool) := do
   let w := cap.request.widget.toBase
   let widgetId ← match inputInt64 "widgets.id" w.id with
     | .ok value => pure value
@@ -403,9 +275,11 @@ def updateWidget (repo : Repo) (cap : AuthorizedUpdate) : IO (Except Error Bool)
   | .error error => pure (.error (.database error))
   | .ok result => pure (updateAffected result)
 
-/-- Delete by (id, owner); `false` when nothing matched. `cap.self_or_admin`
-proves the named owner is the authenticated principal, or admin override. -/
-def deleteWidget (repo : Repo) (cap : AuthorizedDelete) : IO (Except Error Bool) := do
+/-- Delete by (id, owner); `false` when nothing matched.
+`cap.policy.authz_delete_self_or_admin` proves the named owner is the
+authenticated principal, or admin override. -/
+def deleteWidget (repo : Repo) (cap : Valid.WidgetService.DeleteWidgetCall) :
+    IO (Except Error Bool) := do
   let widgetId ← match inputInt64 "widgets.id" cap.request.widget_id.val with
     | .ok value => pure value
     | .error error => return .error error

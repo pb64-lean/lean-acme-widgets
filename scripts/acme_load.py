@@ -23,14 +23,12 @@ import time
 from typing import Any, Sequence
 
 import grpc
-from proto import authz_pb2
 from proto import service_pb2_grpc
 from proto import widgets_pb2
 from python.runfiles import runfiles
 
 
 AUTH_METADATA = (("authorization", "Bearer acme-editor-7"),)
-PRINCIPAL = authz_pb2.Principal(id=7, role_level=2)
 OPERATIONS = ("get", "list", "update", "create", "delete")
 OPERATION_WEIGHTS = {
     "get": 55,
@@ -409,12 +407,9 @@ async def seed_widgets(
     ids: list[int] = []
     for number in range(1, count + 1):
         response = await stub.CreateWidget(
-            authz_pb2.CheckedCreateWidgetRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.CreateWidgetRequest(
-                    user_id=7,
-                    widget=widget(f"Seed widget {number}", 1000 + number, 10),
-                ),
+            widgets_pb2.CreateWidgetRequest(
+                user_id=7,
+                widget=widget(f"Seed widget {number}", 1000 + number, 10),
             ),
             metadata=AUTH_METADATA,
             timeout=timeout,
@@ -437,56 +432,42 @@ async def one_operation(
     widget_id = rng.choice(hot_ids)
     if operation == "get":
         await stub.GetWidget(
-            authz_pb2.CheckedGetWidgetRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.GetWidgetRequest(widget_id=widget_id),
-            ), metadata=AUTH_METADATA, timeout=timeout,
+            widgets_pb2.GetWidgetRequest(widget_id=widget_id),
+            metadata=AUTH_METADATA, timeout=timeout,
         )
     elif operation == "list":
         await stub.ListWidgets(
-            authz_pb2.CheckedListWidgetsRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.ListWidgetsRequest(
-                    user_id=7, page_size=rng.randint(10, 100),
-                ),
+            widgets_pb2.ListWidgetsRequest(
+                user_id=7, page_size=rng.randint(10, 100),
             ), metadata=AUTH_METADATA, timeout=timeout,
         )
     elif operation == "update":
         await stub.UpdateWidget(
-            authz_pb2.CheckedUpdateWidgetRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.UpdateWidgetRequest(
-                    user_id=7,
-                    widget=widget(
-                        f"Updated widget {worker_id}-{sequence}",
-                        rng.randint(1000, 9999),
-                        rng.randint(0, 1000),
-                        widget_id,
-                    ),
+            widgets_pb2.UpdateWidgetRequest(
+                user_id=7,
+                widget=widget(
+                    f"Updated widget {worker_id}-{sequence}",
+                    rng.randint(1000, 9999),
+                    rng.randint(0, 1000),
+                    widget_id,
                 ),
             ), metadata=AUTH_METADATA, timeout=timeout,
         )
     elif operation == "create":
         await stub.CreateWidget(
-            authz_pb2.CheckedCreateWidgetRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.CreateWidgetRequest(
-                    user_id=7,
-                    widget=widget(
-                        f"Created widget {worker_id}-{sequence}",
-                        rng.randint(1000, 9999),
-                        rng.randint(0, 1000),
-                    ),
+            widgets_pb2.CreateWidgetRequest(
+                user_id=7,
+                widget=widget(
+                    f"Created widget {worker_id}-{sequence}",
+                    rng.randint(1000, 9999),
+                    rng.randint(0, 1000),
                 ),
             ), metadata=AUTH_METADATA, timeout=timeout,
         )
     else:
         await stub.DeleteWidget(
-            authz_pb2.CheckedDeleteWidgetRequest(
-                principal=PRINCIPAL,
-                request=widgets_pb2.DeleteWidgetRequest(
-                    user_id=7, widget_id=rng.randint(1_000_000, 2_000_000),
-                ),
+            widgets_pb2.DeleteWidgetRequest(
+                user_id=7, widget_id=rng.randint(1_000_000, 2_000_000),
             ), metadata=AUTH_METADATA, timeout=timeout,
         )
 

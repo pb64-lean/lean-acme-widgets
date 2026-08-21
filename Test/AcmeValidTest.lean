@@ -1,25 +1,18 @@
 import AcmeLean.user
 import AcmeLean.widgets
-import AcmeLean.authz
 import AcmeValid.user
 import AcmeValid.widgets
-import AcmeValid.authz
+import AcmeValid.service
 import Acme.Auth
 import Acme.Repo
 import Acme.Service
 import Grpc
 
 /-!
-Validation + authorization refinement types, hermetically: field rules on
-User/Widget, the message-level ownership rule on CreateWidgetRequest, and the
-(Principal, request) authorization products whose CEL policies are dependent
-propositions in `AcmeValid` structures. Every rejection is asserted by rule
-id; the accepted cases demonstrate handlers can *use* the carried proofs.
-
-Phase 7 additions: the bearer-token authentication layer (`Acme.Auth`), the
-wire-principal binding and capability smart constructors (`Acme.Repo`), the
-typed violation classification (`Acme.Service.ruleKind`), and the checked
-Int → UIntN row conversions.
+Validation and generated method authorization, hermetically: field/message
+rules on ordinary requests, method CEL over the shared authenticated Principal,
+exact violation/status mapping, startup token validation, and checked database
+numeric conversions. There are no wire Principal or Checked* request messages.
 -/
 
 open acme.v1
@@ -45,21 +38,16 @@ def goodWidget : Widget :=
   { id := 0, owner_id := 7, name := "Left-handed flange", sku := "wgt-1024",
     quantity := 12, description := "" }
 
-def editor : Principal := { id := 7, role_level := 2 }
-def admin : Principal := { id := 99, role_level := 3 }
-def viewer : Principal := { id := 7, role_level := 1 }
-
 def createReq : CreateWidgetRequest := { user_id := 7, widget := some goodWidget }
 
-/-- Expect a violation with rule id `id` whose typed classification maps to
-gRPC status `code`. -/
-def expectStatus (r : Except Protovalidate.Violation α) (id : String)
-    (code : Grpc.Code) (label : String) : IO Unit := do
-  match r with
-  | .ok _ => throw (IO.userError s!"{label}: expected violation {id}, got ok")
-  | .error e =>
-    expect (e.ruleId == id) s!"{label}: expected {id}, got {e.ruleId}"
-    expect ((Acme.Service.statusOfViolation e).code == code) s!"{label}: wrong status code"
+/-- Generated policy failures intrinsically map to PERMISSION_DENIED. -/
+def expectPolicyStatus (decision : Protovalidate.Decision policy)
+    (id : String) (label : String) : IO Unit := do
+  match ← (Protovalidate.Authz.authorize decision (fun _ => ())).run with
+  | .ok _ => throw (IO.userError s!"{label}: expected {id}, got ok")
+  | .error status =>
+    expect (status.code == .permissionDenied) s!"{label}: wrong status code"
+    expect (status.messageD.contains id) s!"{label}: missing rule id in status"
 
 def main : IO Unit := do
   -- ── field rules ─────────────────────────────────────────────────────────
@@ -84,72 +72,17 @@ def main : IO Unit := do
       { createReq with widget := some { goodWidget with owner_id := 8 } })
     "create.owner_matches" "owner mismatch"
 
-  -- ── authorization products: policy as propositions ──────────────────────
-  let checkedCreate (p : Principal) (r : CreateWidgetRequest) : CheckedCreateWidgetRequest :=
-    { principal := some p, request := some r }
-  expectId (Valid.CheckedCreateWidgetRequest.validate (checkedCreate editor createReq))
-    "" "editor creates own widget"
-  expectId (Valid.CheckedCreateWidgetRequest.validate (checkedCreate viewer createReq))
-    "authz.create.editor" "viewer cannot create"
-  expectId (Valid.CheckedCreateWidgetRequest.validate
-      (checkedCreate { editor with id := 8 }
-        { user_id := 8, widget := some { goodWidget with owner_id := 8 } }))
-    "" "other editor creates for itself"
-  expectId (Valid.CheckedCreateWidgetRequest.validate
-      (checkedCreate { editor with id := 8 } createReq))
-    "authz.create.self" "cannot create for someone else"
-  expectId (Valid.CheckedCreateWidgetRequest.validate
-      { principal := none, request := some createReq })
-    "required" "principal required"
-  expectId (Valid.CheckedCreateWidgetRequest.validate
-      (checkedCreate { id := 7, role_level := 9 } createReq))
-    "uint32.gt_lt" "role_level out of range"
-
-  -- list: self or admin
+  -- Request validation remains independent of authentication/authorization.
   let listReq : ListWidgetsRequest := { user_id := 7, page_size := 20 }
-  expectId (Valid.CheckedListWidgetsRequest.validate
-      { principal := some viewer, request := some listReq }) "" "viewer lists own"
-  expectId (Valid.CheckedListWidgetsRequest.validate
-      { principal := some admin, request := some listReq }) "" "admin lists anyone"
-  expectId (Valid.CheckedListWidgetsRequest.validate
-      { principal := some { viewer with id := 8 }, request := some listReq })
-    "authz.list.self_or_admin" "stranger cannot list"
-  expectId (Valid.CheckedListWidgetsRequest.validate
-      { principal := some viewer, request := some { listReq with page_size := 0 } })
+  expectId (Valid.ListWidgetsRequest.validate listReq) "" "valid list request"
+  expectId (Valid.ListWidgetsRequest.validate { listReq with page_size := 0 })
     "uint32.gt_lt" "page_size floor"
-
-  -- update: self + editor + deep widget-owner rule (three-hop traversal)
   let updReq : UpdateWidgetRequest :=
     { user_id := 7, widget := some { goodWidget with id := 41 } }
-  expectId (Valid.CheckedUpdateWidgetRequest.validate
-      { principal := some editor, request := some updReq }) "" "editor updates own"
-  expectId (Valid.CheckedUpdateWidgetRequest.validate
-      { principal := some editor, request := some { updReq with widget := some goodWidget } })
+  expectId (Valid.UpdateWidgetRequest.validate updReq) "" "valid update request"
+  expectId (Valid.UpdateWidgetRequest.validate
+      { updReq with widget := some goodWidget })
     "update.has_id" "update requires widget id"
-  expectId (Valid.CheckedUpdateWidgetRequest.validate
-      { principal := some viewer, request := some updReq })
-    "authz.update.editor" "viewer cannot update"
-
-  -- delete: self or admin
-  let delReq : DeleteWidgetRequest := { user_id := 7, widget_id := 41 }
-  expectId (Valid.CheckedDeleteWidgetRequest.validate
-      { principal := some viewer, request := some delReq }) "" "owner deletes own"
-  expectId (Valid.CheckedDeleteWidgetRequest.validate
-      { principal := some admin, request := some delReq }) "" "admin deletes anyone's"
-  expectId (Valid.CheckedDeleteWidgetRequest.validate
-      { principal := some { viewer with id := 8 }, request := some delReq })
-    "authz.delete.self_or_admin" "stranger cannot delete"
-
-  -- ── the proofs are usable ───────────────────────────────────────────────
-  match Valid.CheckedCreateWidgetRequest.validate (checkedCreate editor createReq) with
-  | .error e => throw (IO.userError s!"proof demo: {e}")
-  | .ok checked =>
-    -- The ownership equation is a hypothesis, not a runtime re-check: a
-    -- handler can rewrite along it.
-    let _ : checked.principal.toBase.id = checked.request.toBase.user_id :=
-      checked.authz_create_self
-    let _ : checked.principal.toBase.role_level ≥ 2 := checked.authz_create_editor
-    expect (checked.toBase.principal.isSome) "toBase roundtrip"
 
   -- encode → decodeValid roundtrip through the wire
   match createReq.encode with
@@ -168,106 +101,109 @@ def main : IO Unit := do
   let authEditor7 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-editor-7")) with
     | .ok p => pure p
     | .error s => throw (IO.userError s!"editor-7 token rejected: {s.messageD}")
-  expect (authEditor7.id == 7 && authEditor7.roleLevel == 2) "editor-7 identity"
+  expect (authEditor7.id.val == 7 && authEditor7.roles.val == #["editor"])
+    "editor-7 identity"
   let authViewer7 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-viewer-7")) with
     | .ok p => pure p
     | .error s => throw (IO.userError s!"viewer-7 token rejected: {s.messageD}")
   let authEditor8 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-editor-8")) with
     | .ok p => pure p
     | .error s => throw (IO.userError s!"editor-8 token rejected: {s.messageD}")
+  let authAdmin99 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-admin-99")) with
+    | .ok p => pure p
+    | .error s => throw (IO.userError s!"admin-99 token rejected: {s.messageD}")
   let expectUnauthenticated (auth? : Option String) (label : String) : IO Unit := do
     match Acme.Auth.authenticate table (headers auth?) with
-    | .ok p => throw (IO.userError s!"{label}: unexpectedly authenticated {p}")
+    | .ok p => throw (IO.userError
+        s!"{label}: unexpectedly authenticated principal {p.id.val}")
     | .error s => expect (s.code == .unauthenticated) s!"{label}: wrong code"
   expectUnauthenticated none "missing header"
   expectUnauthenticated (some "Bearer bogus") "unknown token"
   expectUnauthenticated (some "Basic acme-editor-7") "wrong scheme"
 
-  -- Startup-bound capabilities retain the exact principal for each token;
-  -- selecting one credential can never return another principal's value.
-  let boundIdentities := table.bind fun principal =>
-    (principal.id, principal.roleLevel)
-  let boundEditor7 ← match boundIdentities.authenticate
-      (headers (some "Bearer acme-editor-7")) with
-    | .ok value => pure value
-    | .error s => throw (IO.userError s!"bound editor-7 token rejected: {s.messageD}")
-  let boundEditor8 ← match boundIdentities.authenticate
-      (headers (some "Bearer acme-editor-8")) with
-    | .ok value => pure value
-    | .error s => throw (IO.userError s!"bound editor-8 token rejected: {s.messageD}")
-  expect (boundEditor7 == (7, 2)) "editor-7 bound capability"
-  expect (boundEditor8 == (8, 2)) "editor-8 bound capability"
-  expect (boundEditor7 != boundEditor8) "principal-bound capability isolation"
-  expect (boundIdentities.authenticate (headers (some "Bearer bogus")) |>.isOk |> not)
-    "unknown token selected a bound capability"
-  let boundHandlers := table.bind fun principal => fun (_ : Unit) => principal.id
-  let editor7Handler ← match boundHandlers.authenticate
-      (headers (some "Bearer acme-editor-7")) with
-    | .ok handler => pure handler
-    | .error s => throw (IO.userError s!"bound editor-7 handler rejected: {s.messageD}")
-  let editor8Handler ← match boundHandlers.authenticate
-      (headers (some "Bearer acme-editor-8")) with
-    | .ok handler => pure handler
-    | .error s => throw (IO.userError s!"bound editor-8 handler rejected: {s.messageD}")
-  expect (editor7Handler () == 7) "editor-7 handler captured another principal"
-  expect (editor8Handler () == 8) "editor-8 handler captured another principal"
-
-  -- misconfigured tables fail at construction
-  expect (Acme.Auth.TokenTable.parse "t:7:2,u:8:1" |>.isOk) "valid spec parses"
-  expect (!(Acme.Auth.TokenTable.parse "t:0:2" |>.isOk)) "id 0 rejected"
-  expect (!(Acme.Auth.TokenTable.parse "t:7:4" |>.isOk)) "role 4 rejected"
+  -- The common generated Principal rules validate server configuration once.
+  expect (Acme.Auth.TokenTable.parse "t:7:editor+auditor,u:8:viewer" |>.isOk)
+    "valid role-set spec parses"
+  expect (!(Acme.Auth.TokenTable.parse "t:0:editor" |>.isOk)) "id 0 rejected"
+  expect (!(Acme.Auth.TokenTable.parse "t:7:editor+editor" |>.isOk))
+    "duplicate role rejected"
+  let noRoleTable ← match Acme.Auth.TokenTable.parse "unprivileged:7:" with
+    | .ok parsed => pure parsed
+    | .error error => throw (IO.userError s!"empty role set rejected: {error}")
+  let noRolePrincipal ← match Acme.Auth.authenticate noRoleTable
+      (headers (some "Bearer unprivileged")) with
+    | .ok principal => pure principal
+    | .error status => throw (IO.userError s!"empty-role token rejected: {status.messageD}")
+  expect noRolePrincipal.roles.val.isEmpty "empty role field did not map to #[]"
   expect (!(Acme.Auth.TokenTable.parse "gibberish" |>.isOk)) "malformed spec rejected"
 
-  -- ── binding: wire principal must equal the authenticated caller ────────
-  match Valid.CheckedCreateWidgetRequest.validate (checkedCreate editor createReq) with
-  | .error e => throw (IO.userError s!"binding demo validate: {e}")
-  | .ok v =>
-    match Acme.Repo.authorizeCreate authEditor7 v with
-    | none => throw (IO.userError "bound create was refused")
-    | some cap =>
-      -- the capability carries the policy relative to the AUTHENTICATED principal
-      let _ : cap.request.widget.toBase.owner_id = cap.principal.id := cap.owner_eq
-      let _ : 2 ≤ cap.principal.roleLevel := cap.editor
-      expect (cap.principal.id == 7) "capability principal"
-    -- same wire request, different authenticated identities: refused
-    expect (Acme.Repo.authorizeCreate authViewer7 v |>.isNone) "role mismatch refused"
-    expect (Acme.Repo.authorizeCreate authEditor8 v |>.isNone) "id mismatch refused"
+  -- ── generated method policies over (server principal, plain request) ───
+  let createV ← match Valid.CreateWidgetRequest.validate createReq with
+    | .ok request => pure request
+    | .error violation => throw (IO.userError s!"create fixture: {violation}")
+  let listV ← match Valid.ListWidgetsRequest.validate listReq with
+    | .ok request => pure request
+    | .error violation => throw (IO.userError s!"list fixture: {violation}")
+  let updateV ← match Valid.UpdateWidgetRequest.validate updReq with
+    | .ok request => pure request
+    | .error violation => throw (IO.userError s!"update fixture: {violation}")
+  let deleteV ← match Valid.DeleteWidgetRequest.validate
+      { user_id := 7, widget_id := 41 } with
+    | .ok request => pure request
+    | .error violation => throw (IO.userError s!"delete fixture: {violation}")
 
-  -- ── typed violation classification ─────────────────────────────────────
-  -- all runtime-reachable authz.* rules map to PERMISSION_DENIED...
-  expectStatus (Valid.CheckedCreateWidgetRequest.validate
-      (checkedCreate { editor with id := 8 } createReq))
-    "authz.create.self" .permissionDenied "classify create.self"
-  expectStatus (Valid.CheckedCreateWidgetRequest.validate (checkedCreate viewer createReq))
-    "authz.create.editor" .permissionDenied "classify create.editor"
-  expectStatus (Valid.CheckedListWidgetsRequest.validate
-      { principal := some { viewer with id := 8 },
-        request := some { user_id := 7, page_size := 20 } })
-    "authz.list.self_or_admin" .permissionDenied "classify list.self_or_admin"
-  let updReq : UpdateWidgetRequest :=
-    { user_id := 7, widget := some { goodWidget with id := 41 } }
-  expectStatus (Valid.CheckedUpdateWidgetRequest.validate
-      { principal := some { editor with id := 8 }, request := some updReq })
-    "authz.update.self" .permissionDenied "classify update.self"
-  expectStatus (Valid.CheckedUpdateWidgetRequest.validate
-      { principal := some viewer, request := some updReq })
-    "authz.update.editor" .permissionDenied "classify update.editor"
-  expectStatus (Valid.CheckedDeleteWidgetRequest.validate
-      { principal := some { viewer with id := 8 },
-        request := some { user_id := 7, widget_id := 41 } })
-    "authz.delete.self_or_admin" .permissionDenied "classify delete.self_or_admin"
-  -- (authz.update.widget_owner is unreachable at runtime — it is implied by
-  -- update.owner_matches + authz.update.self — but classified by the same
-  -- #guard-checked mapping in Acme.Service.)
-  -- ... and field rules to INVALID_ARGUMENT
-  expectStatus (Valid.Widget.validate { goodWidget with sku := "bogus" })
-    "string.pattern" .invalidArgument "classify field rule"
-  expectStatus (Valid.CheckedCreateWidgetRequest.validate
-      { principal := none, request := some createReq })
-    "required" .invalidArgument "classify required"
-  expect (Acme.Service.authzRuleIds.all
-      (fun id => (Acme.Service.statusOfViolation ⟨"", id, ""⟩).code == .permissionDenied))
-    "every declared authz rule id classifies as PERMISSION_DENIED"
+  expectId (Valid.WidgetService.CreateWidgetValidatePolicy authEditor7 createV)
+    "" "editor creates for self"
+  expectId (Valid.WidgetService.CreateWidgetValidatePolicy authViewer7 createV)
+    "authz.create.editor" "viewer cannot create"
+  expectId (Valid.WidgetService.CreateWidgetValidatePolicy authEditor8 createV)
+    "authz.create.self" "principal 8 cannot create for user 7"
+  expectId (Valid.WidgetService.ListWidgetsValidatePolicy authViewer7 listV)
+    "" "viewer lists self"
+  expectId (Valid.WidgetService.ListWidgetsValidatePolicy authAdmin99 listV)
+    "" "admin lists another user"
+  expectId (Valid.WidgetService.ListWidgetsValidatePolicy authEditor8 listV)
+    "authz.list.self_or_admin" "editor 8 cannot list user 7"
+  expectId (Valid.WidgetService.UpdateWidgetValidatePolicy authEditor7 updateV)
+    "" "editor updates self"
+  expectId (Valid.WidgetService.UpdateWidgetValidatePolicy authViewer7 updateV)
+    "authz.update.editor" "viewer cannot update"
+  expectId (Valid.WidgetService.UpdateWidgetValidatePolicy authEditor8 updateV)
+    "authz.update.self" "editor 8 cannot update for user 7"
+  expectId (Valid.WidgetService.DeleteWidgetValidatePolicy authViewer7 deleteV)
+    "" "viewer deletes own widget"
+  expectId (Valid.WidgetService.DeleteWidgetValidatePolicy authAdmin99 deleteV)
+    "" "admin deletes another user's widget"
+  expectId (Valid.WidgetService.DeleteWidgetValidatePolicy authEditor8 deleteV)
+    "authz.delete.self_or_admin" "editor 8 cannot delete user 7's widget"
+
+  -- Successful policy validation carries proofs that handlers/repositories
+  -- can use; failures map directly to PERMISSION_DENIED by the common runtime.
+  match Valid.WidgetService.CreateWidgetValidatePolicy authEditor7 createV with
+  | .error violation => throw (IO.userError s!"create proof: {violation}")
+  | .ok evidence =>
+    let _ : authEditor7.toBase.id = createV.toBase.user_id :=
+      evidence.proof.authz_create_self
+    let _ : "editor" ∈ authEditor7.toBase.roles ∨
+        "admin" ∈ authEditor7.toBase.roles :=
+      evidence.proof.authz_create_editor
+    pure ()
+  expectPolicyStatus
+    (Valid.WidgetService.CreateWidgetCheckPolicy authEditor8 createV)
+    "authz.create.self" "create policy status"
+  expectPolicyStatus
+    (Valid.WidgetService.CreateWidgetCheckPolicy authViewer7 createV)
+    "authz.create.editor" "role policy status"
+  expectPolicyStatus
+    (Valid.WidgetService.DeleteWidgetCheckPolicy authEditor8 deleteV)
+    "authz.delete.self_or_admin" "delete policy status"
+
+  match ← (Protovalidate.Authz.validateRequest Valid.Widget.validate
+      { goodWidget with sku := "bogus" }).run with
+  | .ok _ => throw (IO.userError "invalid request unexpectedly passed")
+  | .error status =>
+    expect (status.code == .invalidArgument) "field rule did not map to INVALID_ARGUMENT"
+    expect (status.messageD.contains "string.pattern") "field status lost rule id"
 
   -- ── checked DB conversions ─────────────────────────────────────────────
   expect (Acme.Repo.uint64OfInt "c" (-1) |>.isOk |> not) "negative rejected (uint64)"

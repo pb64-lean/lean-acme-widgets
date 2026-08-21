@@ -17,73 +17,70 @@ Widgets** service, tying the sibling repositories together end to end —
   configuration (consumed remotely from a pinned commit, not a sibling
   checkout)
 
-The service enforces **authorization by construction**. Each RPC request is a
-`(Principal, request)` product whose message-level CEL rules *are* the
-authorization policy; the generated `AcmeValid.*` structure carries those
-policies as dependent propositions, so a handler holding a validated request
-holds a machine-checked proof that the policy was satisfied.
+The service enforces **authorization by construction** without putting
+authorization envelopes on the wire. RPCs use their ordinary request messages;
+method-level CEL annotations describe policies over a synthetic
+`{ principal, request }` value. The principal is resolved from request headers
+by the server, and protovalidate-lean generates a proof-carrying call type whose
+private constructor is used only after authentication, request validation, and
+authorization have succeeded.
 
 ```lean
--- generated from authz.proto's CEL:
-structure CheckedCreateWidgetRequest where
-  principal : Valid.Principal
+-- generated from service.proto's method annotation:
+structure WidgetService.CreateWidgetPolicy
+    (principal : pb64.authz.v1.Valid.Principal)
+    (request : Valid.CreateWidgetRequest) : Prop where
+  authz_create_self : principal.toBase.id = request.toBase.user_id
+  authz_create_editor :
+    "editor" ∈ principal.toBase.roles ∨ "admin" ∈ principal.toBase.roles
+
+structure WidgetService.CreateWidgetCall where
+  private mk ::
+  principal : pb64.authz.v1.Valid.Principal
   request   : Valid.CreateWidgetRequest
-  authz_create_self   : principal.toBase.id = request.toBase.user_id
-  authz_create_editor : principal.toBase.role_level ≥ 2
+  policy    : WidgetService.CreateWidgetPolicy principal request
 ```
 
-**Scope of the guarantee — policy relative to an authenticated principal.**
 Requests are authenticated *before any request body is read*: grpc-lean's
-request-header authorizer resolves the `authorization: Bearer` token against
-the server's token table at END_HEADERS, and a missing/unknown token is
+method-local request authenticator resolves the `authorization: Bearer` token
+against the server's token table at END_HEADERS, and a missing/unknown token is
 rejected with `UNAUTHENTICATED` while the request body is still unread (the
-demonstrable security win of the pre-body authorizer — malformed or oversized
+demonstrable security win of pre-body authentication — malformed or oversized
 bodies from unauthenticated peers never reach decoding). Successful
-authentication mints an `Acme.Auth.AuthenticatedPrincipal` — a type that is
-*unfabricable* outside `Auth.lean` (module-system `private` constructor;
-holding one is evidence a configured token vouched for that identity) — and
-the accept-capability the authorizer returns is a handler closing over it.
+authentication supplies the common validated `pb64.authz.v1.Principal` through
+grpc-lean's private-constructor `Authenticated` wrapper. Request field failures
+map to `INVALID_ARGUMENT`; method-policy failures map directly to
+`PERMISSION_DENIED`, without consumer-maintained rule-ID classification.
 
-The wire `Principal` field is *bound* to the authenticated identity: after
-validation, the handler's single
-binding check (`Auth.Bound` — wire id and role_level equal the authenticated
-principal's) turns every generated `authz.*` proposition into one about the
-*authenticated* caller. A valid token presenting someone else's principal is
-`PERMISSION_DENIED` (per gRPC conventions: the caller *is* identified, so not
-`UNAUTHENTICATED`; what is denied is acting as somebody else). The evidence
-then crosses the repository boundary as per-operation capabilities
-(`Acme.Repo.AuthorizedCreate` carries `owner_eq : widget owner =
-authenticated id` and `editor : role_level ≥ 2`; see
-`authorizeCreate_sound`), then is projected into the generated query's typed
-parameters.
+The generated `*Call` is the repository capability: it contains the validated
+request, the exact server-authenticated principal, and each policy proposition.
+There is no wire principal to spoof, no binding predicate, no second local
+Principal representation, and no per-principal service registry.
 
 The trusted boundary includes the token table itself (configuration:
-`ACME_BEARER_TOKENS=token:id:role_level,...`, or a built-in demo table) and
-transport confidentiality for tokens (serve TLS in production). The public
-protocol includes the wire `Principal`; removing it and generating checked
-products over only the server-side principal is outside the compatibility
-contract because it changes the protobuf API.
+`ACME_BEARER_TOKENS=token:id:[role[+role...]],...`, or a built-in demo table) and
+transport confidentiality for tokens (serve TLS in production). Roles are a
+flat set: policies explicitly say `editor || admin`; common code never assigns
+an ordinal rank or silently expands role implications.
 
 ## Layout
 
-- `proto/` — `user.proto`, `widgets.proto`, `authz.proto`, `service.proto`
-  with buf.validate annotations. Wired through `lean_proto_library`
-  (`AcmeLean.*`) + `lean_protovalidate_library` (`AcmeValid.*`).
-- `lean/Acme/` — `Auth.lean` (bearer-token authentication; unfabricable
-  `AuthenticatedPrincipal`, `Bound` binding predicate), `Repo.lean`
-  (capability-typed persistence through generated lean-pgx runners:
-  `Authorized*` capabilities, `authorize*` smart constructors + soundness
-  lemmas, and the checked PostgreSQL `Int64` ↔ protobuf unsigned adapter),
-  `Service.lean`
-  (WidgetService handlers: pre-body authentication, refinement-type
-  validation, principal binding, typed `RuleKind` violation classification),
+- `proto/` — `user.proto`, `widgets.proto`, and `service.proto`, with ordinary
+  RPC inputs, buf.validate field/message rules, and `pb64.authz.v1.method`
+  authorization options. Wired through `lean_proto_library` (`AcmeLean.*`) +
+  `lean_protovalidate_grpc_library` (`AcmeValid.*`). The common Principal and
+  annotation schema live with protovalidate-lean.
+- `lean/Acme/` — `Auth.lean` (bearer tokens to the common validated Principal),
+  `Repo.lean` (generated `*Call` capabilities through generated lean-pgx
+  runners and the checked PostgreSQL `Int64` ↔ protobuf unsigned adapter),
+  `Service.lean` (generated authenticated registration plus business handlers),
   `Model.lean` (pure in-memory service model over capability commands with
   policy-preservation lemmas), `Main.lean` (`//lean/Acme:acme_server`).
 - `//Integration:grpc_tls_test` — in-process TLS end-to-end;
   `//Integration:lean_pgx_live_test{,_pg17}` — fresh PostgreSQL clusters,
   migration, attachment, and all five generated CRUD runners.
 - `Test/` — `smoke_test` (ecosystem links), `acme_valid_test` (validation +
-  authorization refinement types + authentication/binding/classification,
+  generated method authorization and common-principal authentication,
   hermetic), `//lean/Acme:acme_assurance` (compile-time audit: capability
   soundness + roundtrip theorems exist and are axiom-clean).
 - `db/migrations/0001_schema.sql` — canonical DDL consumed by lean-pgx,
@@ -137,7 +134,7 @@ graph during elaboration and generates the startup code:
 | `ACME_DATABASE_URL` | string; `postgres://acme@localhost:54398/acme` | PostgreSQL connection URI |
 | `ACME_LISTEN_PORT` | checked `UInt16`; `50061` | gRPC listener port |
 | `ACME_RESPONSE_COMPRESSION` | boolean; `false` | Enable negotiated gzip responses; request gzip remains supported |
-| `ACME_BEARER_TOKENS` | optional `token:id:role_level,...` | Authentication table; absent uses the demo table |
+| `ACME_BEARER_TOKENS` | optional `token:id:[role[+role...]],...` | Authentication table; absent uses the demo table; an empty final field means no roles |
 | `ACME_TLS_CERTIFICATE` | optional file path | DER leaf certificate |
 | `ACME_TLS_SIGNING_KEY` | optional file path | 32-byte Ed25519 signing key |
 
@@ -171,8 +168,8 @@ rather than maximum throughput.
 `scripts/acme-e2e.sh` drives the running server with `grpcurl` (every call
 carries `-H "authorization: Bearer <token>"` against the demo token table),
 covering: authentication negatives (missing token → `UNAUTHENTICATED` before
-the body is processed; unknown token → `UNAUTHENTICATED`; valid token with a
-mismatched wire principal → `PERMISSION_DENIED` binding rejection), the CRUD
+the body is processed; unknown token → `UNAUTHENTICATED`; principal 8 asking
+to act for user 7 → generated-policy `PERMISSION_DENIED`), the CRUD
 happy paths, all runtime-reachable `authz.*` denial rules (by rule id →
 `PERMISSION_DENIED`), a field-rule rejection (→ `INVALID_ARGUMENT`),
 `NotFound`, cross-call persistence, and graceful listener shutdown. `tls`
@@ -199,8 +196,8 @@ does not run DDL: deployment must apply `db/migrations/0001_schema.sql` before
   grpc-lean's `serveTls`. `scripts/acme-grpc-tls.sh` verifies it in-process:
   the **Lean** gRPC client (`Client.connectTls`, trusting the leaf PEM) calls
   the WidgetService over TLS and gets an authenticated create, a pre-body
-  `UNAUTHENTICATED` rejection (no token), a principal-binding denial, and two
-  authz denials — exercising the whole stack under encryption.
+  `UNAUTHENTICATED` rejection (no token) and role/cross-principal authz denials
+  — exercising the whole stack under encryption.
 
   Mainstream TLS clients interoperate with this listener. The server
   *negotiates* a single suite (TLS_CHACHA20_POLY1305_SHA256 / X25519 /

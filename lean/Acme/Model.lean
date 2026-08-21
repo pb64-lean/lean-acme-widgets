@@ -2,7 +2,6 @@ module
 
 public import AcmeLean.widgets
 public import AcmeValid.widgets
-public import Acme.Auth
 public import Acme.Repo
 import all AcmeLean.widgets
 
@@ -15,8 +14,8 @@ open acme.v1
 
 /-!
 Pure in-memory model of the widget service's mutating surface. Commands are
-exactly the repository capabilities (`Acme.Repo.Authorized*`) — the model
-consumes the same evidence the SQL repository does — so policy-preservation
+exactly the generated `WidgetService.*Call` capabilities — the model consumes
+the same evidence the SQL repository does — so policy-preservation
 facts about `applyCommand` are statements about what any store driven by
 authorized commands can look like: creates insert rows owned by the
 authenticated principal, updates rewrite only rows owned by the
@@ -32,9 +31,9 @@ structure Store where
 /-- The mutating commands, carrying capabilities — an unauthorized command is
 unrepresentable. -/
 inductive Command where
-  | create (cap : Repo.AuthorizedCreate)
-  | update (cap : Repo.AuthorizedUpdate)
-  | delete (cap : Repo.AuthorizedDelete)
+  | create (cap : Valid.WidgetService.CreateWidgetCall)
+  | update (cap : Valid.WidgetService.UpdateWidgetCall)
+  | delete (cap : Valid.WidgetService.DeleteWidgetCall)
 
 /-- Mirror of the repository's SQL semantics: insert with a fresh id; update
 by (id, owner); delete by (id, owner). -/
@@ -54,20 +53,22 @@ def applyCommand (s : Store) : Command → Store
           && entry.2.owner_id == cap.request.user_id.val) }
 
 /-- Creation inserts a row owned by the *authenticated* principal. -/
-theorem create_inserts_owned (s : Store) (cap : Repo.AuthorizedCreate) :
+theorem create_inserts_owned (s : Store)
+    (cap : Valid.WidgetService.CreateWidgetCall) :
     ∃ w, (applyCommand s (.create cap)).widgets.head? = some (s.nextId, w) ∧
-      w.owner_id = cap.principal.id := by
+      w.owner_id = cap.principal.toBase.id := by
   refine ⟨{ cap.request.widget.toBase with id := s.nextId }, rfl, ?_⟩
-  exact cap.owner_eq
+  exact Repo.createOwnerEq cap
 
 /-- Updates rewrite only rows owned by the authenticated principal: any row
 with a different owner is preserved verbatim. -/
-theorem update_preserves_foreign (s : Store) (cap : Repo.AuthorizedUpdate)
+theorem update_preserves_foreign (s : Store)
+    (cap : Valid.WidgetService.UpdateWidgetCall)
     (entry : UInt64 × Widget) (hin : entry ∈ s.widgets)
-    (howner : entry.2.owner_id ≠ cap.principal.id) :
+    (howner : entry.2.owner_id ≠ cap.principal.toBase.id) :
     entry ∈ (applyCommand s (.update cap)).widgets := by
   have hne : entry.2.owner_id ≠ cap.request.widget.toBase.owner_id := by
-    rw [cap.owner_eq]; exact howner
+    rw [Repo.updateOwnerEq cap]; exact howner
   have hfix : (if entry.1 == cap.request.widget.toBase.id
         && entry.2.owner_id == cap.request.widget.toBase.owner_id
       then (entry.1, cap.request.widget.toBase) else entry) = entry := by
@@ -78,9 +79,11 @@ theorem update_preserves_foreign (s : Store) (cap : Repo.AuthorizedUpdate)
   exact List.mem_map.mpr ⟨entry, hin, hfix⟩
 
 /-- Deletion removes only the row the policy authorized: a row that
-disappears carried exactly the named (widget_id, owner) pair — and
-`cap.self_or_admin` ties that owner to the principal or an admin override. -/
-theorem delete_removes_named_only (s : Store) (cap : Repo.AuthorizedDelete)
+disappears carried exactly the named (widget_id, owner) pair. The generated
+`cap.policy.authz_delete_self_or_admin` additionally ties that owner to the
+principal or an admin override. -/
+theorem delete_removes_named_only (s : Store)
+    (cap : Valid.WidgetService.DeleteWidgetCall)
     (entry : UInt64 × Widget) (hin : entry ∈ s.widgets)
     (hout : entry ∉ (applyCommand s (.delete cap)).widgets) :
     entry.1 = cap.request.widget_id.val
@@ -108,7 +111,7 @@ theorem applyCommand_wellOwned (s : Store) (c : Command) (h : WellOwned s) :
   | create cap =>
     intro entry hmem
     cases hmem with
-    | head => exact cap.owner_eq ▸ cap.principal.id_pos
+    | head => exact Repo.createOwnerEq cap ▸ Repo.principalIdPositive cap.principal
     | tail _ hmem => exact h entry hmem
   | update cap =>
     intro entry hmem
@@ -117,7 +120,7 @@ theorem applyCommand_wellOwned (s : Store) (c : Command) (h : WellOwned s) :
         && orig.2.owner_id == cap.request.widget.toBase.owner_id) = true
     · rw [if_pos hcond] at hmap
       subst hmap
-      exact cap.owner_eq ▸ cap.principal.id_pos
+      exact Repo.updateOwnerEq cap ▸ Repo.principalIdPositive cap.principal
     · rw [if_neg hcond] at hmap
       subst hmap
       exact h orig horig

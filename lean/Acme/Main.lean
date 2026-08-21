@@ -21,8 +21,8 @@ validated before postgres is dialed.
 
 Authentication: WidgetService methods require an `authorization: Bearer
 <token>` header, resolved against a token table BEFORE any request body is
-read (grpc-lean request-header authorizer). The table comes from
-`ACME_BEARER_TOKENS` (`token:id:role_level,...`) or defaults to the built-in
+read (the generated method-local request authenticator). The table comes from
+`ACME_BEARER_TOKENS` (`token:id:[role[+role...]],...`) or defaults to the built-in
 demo table mirroring the e2e principals.
 
 TLS termination: if `ACME_TLS_CERTIFICATE` (DER leaf certificate path) and
@@ -102,9 +102,12 @@ structure TlsFiles where
     pure Acme.Auth.demoTable
 
 @[lentil] def registry (cfg : AcmeConfig) (repo : Acme.Repo.Repo)
-    (table : Acme.Auth.TokenTable) : Grpc.Registry :=
-  Acme.Service.registry repo table
-    |>.withResponseCompression cfg.responseCompression
+    (table : Acme.Auth.TokenTable) : IO Grpc.Registry := do
+  let registry ← match Acme.Service.registry repo table with
+    | .ok registry => pure registry
+    | .error duplicate => throw (IO.userError
+        s!"gRPC registry init: duplicate method {duplicate.name.path}")
+  pure (registry.withResponseCompression cfg.responseCompression)
 
 @[lentil] def serverConfig (cfg : AcmeConfig) : Grpc.Server.Config :=
   { address := Grpc.Server.anyIPv4 cfg.listenPort }

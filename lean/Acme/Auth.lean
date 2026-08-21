@@ -1,8 +1,8 @@
 module
 
 public import Grpc
-public import AcmeLean.authz
-public import AcmeValid.authz
+public import Pb64Authz.principal
+public import Pb64AuthzValid.principal
 
 public section
 
@@ -10,47 +10,36 @@ namespace Acme
 namespace Auth
 
 /-!
-The authentication layer: resolves the `authorization` request header to an
-`AuthenticatedPrincipal` *before any request body is read* (it runs inside
-grpc-lean's request-header authorizer at END_HEADERS), and provides the
-binding predicate `Bound` that ties the wire-level `acme.v1.Principal` of a
-validated request to that authenticated identity.
+The authentication layer resolves the `authorization` request header to the
+shared, validated `pb64.authz.v1.Principal` *before any request body is read*.
+The principal comes exclusively from server configuration and is passed to
+the generated protected-service registration through `RequestAuthenticator`;
+it never appears in an Acme request message.
 
 The security claim, precisely:
 
-* `AuthenticatedPrincipal` is unfabricable outside this module — its
-  constructor is `private`, and the Lean module system makes a `private`
-  constructor invisible to ordinary importers (only `import all Acme.Auth`,
-  the white-box escape hatch used by in-repo proof/test targets, can see it).
-  `TokenTable.ofEntries`/`parse` are the only minting paths; `lookup?`,
-  `authenticate`, and startup-bound values built with `TokenTable.bind` can
-  only return principals originating there. Thus *holding* an
-  `AuthenticatedPrincipal` is evidence that configuration vouched for exactly
-  this `(id, role_level)` pair.
+* `TokenTable.ofEntries`/`parse` validate every configured identity with the
+  common generated Principal refinement. `lookup?` and `authenticate` can
+  therefore only return positive IDs with unique, individually nonempty,
+  bounded role strings (the role set itself may be empty).
+* `Grpc.Authenticated` is minted only by grpc-lean after this authenticator
+  succeeds; generated method-call constructors remain private. Holding a
+  generated `*Call` is therefore the capability that combines authentication,
+  request validity, and the method's CEL propositions.
 * What remains trusted: the token table itself (server configuration) and
   the transport keeping tokens confidential (serve TLS in production).
 -/
 
-/-- An authenticated caller identity, minted only by this module (private
-constructor; see the module docstring for the exact guarantee). Carries the
-same range refinements as the wire `Principal` rules, so downstream policy
-propositions can be stated directly against the authenticated identity. -/
-structure AuthenticatedPrincipal where
-  private mk ::
-  id : UInt64
-  roleLevel : UInt32
-  id_pos : 0 < id
-  role_ge : 1 ≤ roleLevel
-  role_le : roleLevel ≤ 3
+/-- The common proof-carrying Principal used by every generated protected
+service. This alias adds no consumer-owned identity representation. -/
+abbrev Principal := pb64.authz.v1.Valid.Principal
 
-instance : ToString AuthenticatedPrincipal :=
-  ⟨fun p => s!"principal {p.id} (role_level {p.roleLevel})"⟩
-
-/-- One configured bearer credential: `token` authenticates as `(id, roleLevel)`. -/
+/-- One configured bearer credential. Roles are a flat, application-defined
+set; role implication is expressed explicitly in method CEL. -/
 structure TokenEntry where
   token : String
   id : UInt64
-  roleLevel : UInt32
+  roles : Array String
   deriving Repr
 
 /-- Bearer-token table: the deliberately simple but honest authenticator.
@@ -58,48 +47,50 @@ Entries are validated (and their principals minted) at construction, so a
 misconfigured table fails at startup, not per-request. -/
 structure TokenTable where
   private mk ::
-  private entries : Array (String × AuthenticatedPrincipal)
+  private entries : Array (String × Principal)
 
 /-- Build a table, validating every entry's ranges up front. -/
 def TokenTable.ofEntries (entries : Array TokenEntry) : Except String TokenTable := do
-  let mut out : Array (String × AuthenticatedPrincipal) := #[]
+  let mut out : Array (String × Principal) := #[]
   for e in entries do
     if e.token.isEmpty then
       throw "token table: empty token"
-    if hid : 0 < e.id then
-      if hge : 1 ≤ e.roleLevel then
-        if hle : e.roleLevel ≤ 3 then
-          out := out.push (e.token, ⟨e.id, e.roleLevel, hid, hge, hle⟩)
-        else throw s!"token table: role_level {e.roleLevel} > 3 for token {e.token}"
-      else throw s!"token table: role_level 0 for token {e.token}"
-    else throw s!"token table: id 0 for token {e.token}"
+    match pb64.authz.v1.Valid.Principal.validate { id := e.id, roles := e.roles } with
+    | .ok principal => out := out.push (e.token, principal)
+    | .error violation =>
+      throw s!"token table: invalid principal for token {e.token}: {violation}"
   pure ⟨out⟩
 
-/-- Parse a `token:id:role_level[,token:id:role_level...]` spec (the
-`ACME_BEARER_TOKENS` environment format). Tokens may not contain `:` or `,`. -/
+/-- Parse a `token:id:[role[+role...]][,token:id:[role[+role...]]]` spec (the
+`ACME_BEARER_TOKENS` environment format). Tokens and roles may not contain
+the delimiters `:`, `,`, and `+`. -/
 def TokenTable.parse (spec : String) : Except String TokenTable := do
   let mut entries : Array TokenEntry := #[]
   for part in spec.splitOn "," do
     match part.splitOn ":" with
-    | [token, idStr, roleStr] =>
-      match idStr.toNat?, roleStr.toNat? with
-      | some id, some role =>
-        if id < 2 ^ 64 && role < 2 ^ 32 then
-          entries := entries.push
-            { token, id := UInt64.ofNat id, roleLevel := UInt32.ofNat role }
-        else throw s!"token table: numeric field out of range in {part}"
-      | _, _ => throw s!"token table: malformed numeric field in {part}"
-    | _ => throw s!"token table: expected token:id:role_level, got {part}"
+    | [token, idStr, rolesStr] =>
+      match idStr.toNat? with
+      | some id =>
+        if id < 2 ^ 64 then
+          entries := entries.push {
+            token,
+            id := UInt64.ofNat id,
+            roles := if rolesStr.isEmpty then #[]
+              else rolesStr.splitOn "+" |>.toArray
+          }
+        else throw s!"token table: numeric id out of range in {part}"
+      | none => throw s!"token table: malformed numeric id in {part}"
+    | _ => throw s!"token table: expected token:id:[role[+role...]], got {part}"
   TokenTable.ofEntries entries
 
 /-- Static demo credentials, mirroring the e2e principals
-(`scripts/acme-e2e.sh`): two roles for user 7, an admin, and a second
-legitimate editor used as the "stranger". -/
+(`scripts/acme-e2e.sh`): two differently-privileged credentials for user 7,
+an admin, and a second legitimate editor used as the "stranger". -/
 def demoEntries : Array TokenEntry := #[
-  { token := "acme-editor-7", id := 7, roleLevel := 2 },
-  { token := "acme-viewer-7", id := 7, roleLevel := 1 },
-  { token := "acme-admin-99", id := 99, roleLevel := 3 },
-  { token := "acme-editor-8", id := 8, roleLevel := 2 }]
+  { token := "acme-editor-7", id := 7, roles := #["editor"] },
+  { token := "acme-viewer-7", id := 7, roles := #["viewer"] },
+  { token := "acme-admin-99", id := 99, roles := #["admin"] },
+  { token := "acme-editor-8", id := 8, roles := #["editor"] }]
 
 def demoTable : TokenTable :=
   match TokenTable.ofEntries demoEntries with
@@ -108,28 +99,8 @@ def demoTable : TokenTable :=
 
 /-- Resolve a bearer token. Knowing a configured token *is* the credential. -/
 def TokenTable.lookup? (table : TokenTable) (token : String) :
-    Option AuthenticatedPrincipal :=
+    Option Principal :=
   table.entries.findSome? fun (t, p) => if t == token then some p else none
-
-/-- Values constructed once from every authenticated principal in a token
-table.  The constructor is private so an entry can only be associated with a
-token by `TokenTable.bind`, which applies the builder to that token's exact
-authenticated principal while preserving first-match lookup order. -/
-structure TokenTable.Bound (α : Type) where
-  private mk ::
-  private entries : Array (String × α)
-
-/-- Bind immutable per-principal state to every configured credential.  This
-is intended for startup assembly of handler dispatch or other process-lifetime
-capabilities, keeping their construction off the request path. -/
-def TokenTable.bind (table : TokenTable)
-    (build : AuthenticatedPrincipal → α) : TokenTable.Bound α :=
-  ⟨table.entries.map fun (token, principal) => (token, build principal)⟩
-
-def TokenTable.Bound.lookup? (table : TokenTable.Bound α) (token : String) :
-    Option α :=
-  table.entries.findSome? fun (configured, value) =>
-    if configured == token then some value else none
 
 /-- Compare a configured token with the bytes after the ASCII `Bearer `
 prefix without copying those bytes into a new `String`.  The lookup computes
@@ -150,26 +121,13 @@ entry needs only a length check followed by the runtime string `memcmp`. -/
     false
 
 private def TokenTable.lookupBearerHeader? (table : TokenTable)
-    (header : String) : Option AuthenticatedPrincipal :=
+    (header : String) : Option Principal :=
   if hsize : 7 ≤ header.utf8ByteSize then
     let suffixBytes := header.utf8ByteSize - 7
     have hsuffix : suffixBytes + 7 = header.utf8ByteSize := by omega
     table.entries.findSome? fun (configured, principal) =>
       if configuredTokenMatchesHeader configured header suffixBytes hsuffix then
         some principal
-      else
-        none
-  else
-    none
-
-private def TokenTable.Bound.lookupBearerHeader? (table : TokenTable.Bound α)
-    (header : String) : Option α :=
-  if hsize : 7 ≤ header.utf8ByteSize then
-    let suffixBytes := header.utf8ByteSize - 7
-    have hsuffix : suffixBytes + 7 = header.utf8ByteSize := by omega
-    table.entries.findSome? fun (configured, value) =>
-      if configuredTokenMatchesHeader configured header suffixBytes hsuffix then
-        some value
       else
         none
   else
@@ -188,22 +146,10 @@ private def bearerHeader? (metadata : Grpc.Metadata) : Option String :=
   | some v => if v.startsWith "Bearer " then some v else none
   | none => none
 
-/-- Authenticate headers directly to their startup-bound capability.  Header
-selection and rejection statuses deliberately match `TokenTable.authenticate`. -/
-def TokenTable.Bound.authenticate (table : TokenTable.Bound α)
-    (metadata : Grpc.Metadata) : Except Grpc.Status α :=
-  match bearerHeader? metadata with
-  | none => .error (Grpc.Status.error .unauthenticated
-      "missing authorization bearer token")
-  | some header =>
-    match table.lookupBearerHeader? header with
-    | some value => .ok value
-    | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
-
 /-- Authenticate a request's headers. Missing or unknown credentials are
 UNAUTHENTICATED (gRPC: the caller could not be identified at all). -/
 def authenticate (table : TokenTable) (metadata : Grpc.Metadata) :
-    Except Grpc.Status AuthenticatedPrincipal :=
+    Except Grpc.Status Principal :=
   match bearerHeader? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
@@ -212,12 +158,10 @@ def authenticate (table : TokenTable) (metadata : Grpc.Metadata) :
     | some p => .ok p
     | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 
-/-- The binding predicate: the wire-level `principal` field of a request names
-exactly the authenticated caller. Decidable, so handlers check it once and
-carry the proof; every generated `authz.*` proposition about the wire
-principal then transports to the authenticated identity. -/
-abbrev Bound (p : AuthenticatedPrincipal) (wire : acme.v1.Valid.Principal) : Prop :=
-  wire.toBase.id = p.id ∧ wire.toBase.role_level = p.roleLevel
+/-- The pure pre-body authenticator consumed by generated protected-service
+registration. grpc-lean wraps successful results in `Grpc.Authenticated`. -/
+def requestAuthenticator (table : TokenTable) : Grpc.RequestAuthenticator Principal :=
+  .pure (authenticate table)
 
 end Auth
 end Acme

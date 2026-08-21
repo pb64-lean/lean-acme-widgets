@@ -4,8 +4,8 @@ package acme.v1;
 
 import "buf/validate/validate.proto";
 
-// The widget itself and the plain (pre-authorization) request/response
-// vocabulary. Authorization-checked products over these live in authz.proto.
+// The widget API's ordinary wire vocabulary. Authorization is declared on
+// RPC methods in service.proto and evaluated against a server-side principal.
 message Widget {
   // 0 on create (assigned by the database).
   uint64 id = 1;

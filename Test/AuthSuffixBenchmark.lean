@@ -7,7 +7,7 @@ Run one mode/metadata size per process under an instruction counter.
 -/
 
 private def authenticateCopiedSuffix (table : Acme.Auth.TokenTable)
-    (metadata : Grpc.Metadata) : Except Grpc.Status Acme.Auth.AuthenticatedPrincipal :=
+    (metadata : Grpc.Metadata) : Except Grpc.Status Acme.Auth.Principal :=
   match Acme.Auth.bearerToken? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
@@ -25,13 +25,14 @@ private def metadataOfSize (size : Nat) : Grpc.Metadata := Id.run do
 
 private def runIterations
     (authenticate : Acme.Auth.TokenTable → Grpc.Metadata →
-      Except Grpc.Status Acme.Auth.AuthenticatedPrincipal)
+      Except Grpc.Status Acme.Auth.Principal)
     (table : Acme.Auth.TokenTable) (metadata : Grpc.Metadata)
     (iterations : Nat) : IO UInt64 := do
   let mut checksum : UInt64 := 0
   for _ in [0:iterations] do
     match authenticate table metadata with
-    | .ok principal => checksum := checksum + principal.id + principal.roleLevel.toUInt64
+    | .ok principal =>
+      checksum := checksum + principal.id.val + principal.roles.val.size.toUInt64
     | .error status => throw (IO.userError s!"benchmark authentication failed: {repr status}")
   pure checksum
 
@@ -57,7 +58,7 @@ def main (args : List String) : IO Unit := do
     | "copied_suffix" => pure authenticateCopiedSuffix
     | "borrowed_suffix" => pure Acme.Auth.authenticate
     | _ => throw (IO.userError "mode must be copied_suffix or borrowed_suffix")
-  let expectedPerIteration : UInt64 := 10
+  let expectedPerIteration : UInt64 := 9
   let expected := expectedPerIteration * UInt64.ofNat iterations
   let checksum ← runIterations authenticate Acme.Auth.demoTable metadata iterations
   unless checksum == expected do

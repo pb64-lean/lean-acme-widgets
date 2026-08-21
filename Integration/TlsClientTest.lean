@@ -1,7 +1,6 @@
 import Acme.Auth
 import Acme.Repo
 import Acme.Service
-import AcmeLean.authz
 import AcmeLean.widgets
 import Grpc
 import Pg
@@ -11,9 +10,9 @@ End-to-end over TLS 1.3, in one process: our WidgetService served via
 `Grpc.Server.serveTls` and called by the grpc-lean Lean client via
 `Client.connectTls`. Proves the full path — Lean gRPC client → TLS →
 Lean gRPC server → bearer authentication (pre-body request-header
-authorizer) → refinement-type validation/authz → principal binding →
-capability-typed lean-pgx repository over pg-lean — plus graceful listener
-termination.
+authenticator) → request validation → generated method-level authorization →
+proof-carrying lean-pgx repository over pg-lean — plus graceful listener
+termination. The authenticated Principal is never supplied on the wire.
 
 Env: ACME_DATABASE_URL, ACME_TLS_CERTIFICATE (DER leaf), ACME_TLS_SIGNING_KEY
 (32-byte Ed25519 seed), ACME_TLS_PEM (leaf PEM, the client's trust anchor).
@@ -39,9 +38,8 @@ def widget (ownerId : UInt64) : Widget :=
   { id := 0, owner_id := ownerId, name := "TLS widget", sku := "wgt-7000",
     quantity := 3, description := "" }
 
-def checkedCreate (p : Principal) (userId : UInt64) : CheckedCreateWidgetRequest :=
-  { principal := some p,
-    request := some { user_id := userId, widget := some (widget userId) } }
+def createRequest (userId : UInt64) : CreateWidgetRequest :=
+  { user_id := userId, widget := some (widget userId) }
 
 def main : IO Unit := do
   let pgUrl := (← IO.getEnv "ACME_DATABASE_URL").getD
@@ -55,7 +53,11 @@ def main : IO Unit := do
   let signingKey ← IO.FS.readBinFile (← env! "ACME_TLS_SIGNING_KEY")
   let certPem ← IO.FS.readFile (← env! "ACME_TLS_PEM")
 
-  let server ← Grpc.Server.serveTls (Acme.Service.registry repo Acme.Auth.demoTable)
+  let registry ← match Acme.Service.registry repo Acme.Auth.demoTable with
+    | .ok registry => pure registry
+    | .error duplicate => throw (IO.userError
+        s!"registry: duplicate method {duplicate.name.path}")
+  let server ← Grpc.Server.serveTls registry
     { certificateChain := #[certDer], signingKey }
     { address := Grpc.Server.loopback 0 }
   let port := match server.localAddress with
@@ -72,7 +74,7 @@ def main : IO Unit := do
     { metadata := Grpc.Metadata.empty.insert "authorization" s!"Bearer {token}" }
 
   -- editor creating its own widget: authenticated + authorized, persisted
-  let okBytes ← encode! (checkedCreate { id := 7, role_level := 2 } 7).encode
+  let okBytes ← encode! (createRequest 7).encode
   match ← Async.block (Grpc.Client.call client path okBytes (bearer "acme-editor-7")) with
   | .error status => throw (IO.userError s!"authorized create failed: {status.messageD}")
   | .ok (_, respBytes) =>
@@ -94,30 +96,17 @@ def main : IO Unit := do
       s!"expected Unauthenticated, got {repr status.code}"
     IO.println s!"TLS unauthenticated rejection ok: {status.messageD}"
 
-  -- valid token, wire principal names someone else: binding rejection
-  let mismatchBytes ← encode! (checkedCreate { id := 8, role_level := 2 } 8).encode
-  match ← Async.block (Grpc.Client.call client path mismatchBytes (bearer "acme-editor-7")) with
-  | .ok _ => throw (IO.userError "principal mismatch should have been denied")
-  | .error status =>
-    expect (status.code == Grpc.Code.permissionDenied)
-      s!"expected PermissionDenied for mismatch, got {repr status.code}"
-    expect ((status.messageD.splitOn "does not match").length > 1)
-      s!"expected binding-mismatch detail, got {status.messageD}"
-    IO.println "TLS principal-binding denial ok"
-
-  -- viewer: authorization denied by proposition, surfaced as PERMISSION_DENIED
-  let denyBytes ← encode! (checkedCreate { id := 7, role_level := 1 } 7).encode
-  match ← Async.block (Grpc.Client.call client path denyBytes (bearer "acme-viewer-7")) with
+  -- Viewer: role-membership policy denied, surfaced as PERMISSION_DENIED.
+  match ← Async.block (Grpc.Client.call client path okBytes (bearer "acme-viewer-7")) with
   | .ok _ => throw (IO.userError "viewer create should have been denied over TLS")
   | .error status =>
     expect (status.code == Grpc.Code.permissionDenied)
       s!"expected PermissionDenied, got {repr status.code}"
     IO.println s!"TLS authz denial ok: {status.messageD}"
 
-  -- cross-principal denial (authz.create.self): authenticated as 8, wire
-  -- principal 8, asking to create for user 7
-  let crossBytes ← encode! (checkedCreate { id := 8, role_level := 2 } 7).encode
-  match ← Async.block (Grpc.Client.call client path crossBytes (bearer "acme-editor-8")) with
+  -- Principal 8 asks to create for user 7. Only the token determines the
+  -- principal, so the generated authz.create.self policy must deny the call.
+  match ← Async.block (Grpc.Client.call client path okBytes (bearer "acme-editor-8")) with
   | .ok _ => throw (IO.userError "cross-principal create should have been denied")
   | .error status =>
     expect (status.code == Grpc.Code.permissionDenied) "cross-principal PermissionDenied"

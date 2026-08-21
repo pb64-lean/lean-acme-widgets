@@ -1,6 +1,6 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@protobuf//bazel:py_proto_library.bzl", "py_proto_library")
-load("@protovalidate_lean//protovalidate:defs.bzl", "lean_protovalidate_library")
+load("@protovalidate_lean//protovalidate:defs.bzl", "lean_protovalidate_grpc_library")
 load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
@@ -9,12 +9,12 @@ package(default_visibility = ["//visibility:public"])
 proto_library(
     name = "acme_proto",
     srcs = [
-        "authz.proto",
         "service.proto",
         "user.proto",
         "widgets.proto",
     ],
     deps = [
+        "@protovalidate_lean//proto/pb64/authz/v1:annotations_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],
 )
@@ -37,13 +37,15 @@ genrule(
     name = "acme_py_pb2_grpc_src",
     srcs = [
         ":acme_proto",
+        "@protovalidate_lean//proto/pb64/authz/v1:annotations_proto",
+        "@protovalidate_lean//proto/pb64/authz/v1:principal_proto",
         "@protovalidate//proto/protovalidate/buf/validate:validate_proto",
     ],
     outs = ["service_pb2_grpc.py"],
     cmd = """
 set -eu
 $(location :grpc_python_codegen) \
-  --descriptor_set_in="$(location :acme_proto):$(location @protovalidate//proto/protovalidate/buf/validate:validate_proto)" \
+  --descriptor_set_in="$(location :acme_proto):$(location @protovalidate_lean//proto/pb64/authz/v1:annotations_proto):$(location @protovalidate_lean//proto/pb64/authz/v1:principal_proto):$(location @protovalidate//proto/protovalidate/buf/validate:validate_proto)" \
   --grpc_python_out="$(GENDIR)" \
   proto/service.proto
 """,
@@ -67,7 +69,7 @@ lean_proto_library(
 
 # Validated refinement types (modules AcmeValid.*): CEL rules as dependent
 # propositions, validate/decodeValid/toBase per message.
-lean_protovalidate_library(
+lean_protovalidate_grpc_library(
     name = "acme_valid",
     lean_proto = ":acme_lean",
     proto = ":acme_proto",

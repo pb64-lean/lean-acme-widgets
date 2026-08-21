@@ -2,17 +2,76 @@ syntax = "proto3";
 
 package acme.v1;
 
-import "proto/authz.proto";
+import "pb64/authz/v1/annotations.proto";
 import "proto/widgets.proto";
 
-// The widget API. Every request type is an authorization-checked product
-// (see authz.proto): the server validates it into the AcmeValid refinement
-// type before touching the database, so the policy propositions hold by
-// construction inside every handler.
+// The widget API uses ordinary request messages on the wire. The method
+// annotations are evaluated against a server-authenticated Principal and the
+// validated request. protovalidate-lean generates proof-carrying *Call types,
+// so these policies hold by construction inside every protected handler.
 service WidgetService {
-  rpc CreateWidget(CheckedCreateWidgetRequest) returns (WidgetResponse);
-  rpc GetWidget(CheckedGetWidgetRequest) returns (WidgetResponse);
-  rpc ListWidgets(CheckedListWidgetsRequest) returns (ListWidgetsResponse);
-  rpc UpdateWidget(CheckedUpdateWidgetRequest) returns (WidgetResponse);
-  rpc DeleteWidget(CheckedDeleteWidgetRequest) returns (DeleteWidgetResponse);
+  rpc CreateWidget(CreateWidgetRequest) returns (WidgetResponse) {
+    option (pb64.authz.v1.method) = {
+      require_authenticated: true
+      cel: {
+        id: "authz.create.self"
+        message: "principal may only create widgets for itself"
+        expression: "this.principal.id == this.request.user_id"
+      }
+      cel: {
+        id: "authz.create.editor"
+        message: "creating widgets requires the editor or admin role"
+        expression: "'editor' in this.principal.roles || 'admin' in this.principal.roles"
+      }
+    };
+  }
+
+  // Any authenticated principal may read a widget; no additional policy is
+  // attached to this method.
+  rpc GetWidget(GetWidgetRequest) returns (WidgetResponse) {
+    option (pb64.authz.v1.method) = { require_authenticated: true };
+  }
+
+  rpc ListWidgets(ListWidgetsRequest) returns (ListWidgetsResponse) {
+    option (pb64.authz.v1.method) = {
+      require_authenticated: true
+      cel: {
+        id: "authz.list.self_or_admin"
+        message: "principal may only list its own widgets unless admin"
+        expression: "'admin' in this.principal.roles || this.principal.id == this.request.user_id"
+      }
+    };
+  }
+
+  rpc UpdateWidget(UpdateWidgetRequest) returns (WidgetResponse) {
+    option (pb64.authz.v1.method) = {
+      require_authenticated: true
+      cel: {
+        id: "authz.update.self"
+        message: "principal may only update widgets on its own behalf"
+        expression: "this.principal.id == this.request.user_id"
+      }
+      cel: {
+        id: "authz.update.editor"
+        message: "updating widgets requires the editor or admin role"
+        expression: "'editor' in this.principal.roles || 'admin' in this.principal.roles"
+      }
+      cel: {
+        id: "authz.update.widget_owner"
+        message: "updated widget must be owned by the principal"
+        expression: "!has(this.request.widget) || this.request.widget.owner_id == this.principal.id"
+      }
+    };
+  }
+
+  rpc DeleteWidget(DeleteWidgetRequest) returns (DeleteWidgetResponse) {
+    option (pb64.authz.v1.method) = {
+      require_authenticated: true
+      cel: {
+        id: "authz.delete.self_or_admin"
+        message: "only the owner or an admin may delete"
+        expression: "'admin' in this.principal.roles || this.principal.id == this.request.user_id"
+      }
+    };
+  }
 }

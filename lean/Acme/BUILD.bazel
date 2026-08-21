@@ -2,28 +2,26 @@ package(default_visibility = ["//visibility:public"])
 
 load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_binary", "lean_library")
 
-# Authentication layer: bearer-token resolution to an unfabricable
-# AuthenticatedPrincipal, plus the wire-principal binding predicate.
+# Authentication layer: bearer-token resolution to the shared validated
+# Principal and grpc-lean's pre-body RequestAuthenticator.
 lean_library(
     name = "auth",
     srcs = ["Auth.lean"],
     strip_module_prefix = "lean",
     deps = [
-        "//proto:acme_lean",
-        "//proto:acme_valid",
+        "@protovalidate_lean//proto/pb64/authz/v1:principal_lean",
+        "@protovalidate_lean//proto/pb64/authz/v1:principal_valid",
         "@rules_lean_grpc//:grpc_lean",
     ],
 )
 
-# Capability-typed persistence: repository functions take Authorized*
-# capabilities (validated request + authenticated principal + policy
-# propositions), then execute lean-pgx generated checked queries.
+# Capability-typed persistence: repository functions take generated *Call
+# capabilities, then execute lean-pgx generated checked queries.
 lean_library(
     name = "repo",
     srcs = ["Repo.lean"],
     strip_module_prefix = "lean",
     deps = [
-        ":auth",
         "//db:acme_db",
         "//proto:acme_lean",
         "//proto:acme_valid",
@@ -31,23 +29,21 @@ lean_library(
     ],
 )
 
-# Pure in-memory service model: applyCommand over capability commands, with
+# Pure in-memory service model over generated call capabilities, with
 # policy-preservation lemmas (kernel-checked via :acme_assurance).
 lean_library(
     name = "model",
     srcs = ["Model.lean"],
     strip_module_prefix = "lean",
     deps = [
-        ":auth",
         ":repo",
         "//proto:acme_lean",
         "//proto:acme_valid",
     ],
 )
 
-# WidgetService handlers: pre-body bearer authentication (request-header
-# authorizer), refinement-type validation, principal binding, then the
-# capability-typed repository.
+# WidgetService handlers over generated method capabilities, registered with
+# pre-body bearer authentication and generated request/policy validation.
 lean_library(
     name = "service",
     srcs = ["Service.lean"],
@@ -81,9 +77,10 @@ lean_assurance_test(
     name = "acme_assurance",
     policy_mode = "legacy",
     principal_theorems = [
-        "Acme.Repo.authorizeCreate_sound",
-        "Acme.Repo.authorizeCreate_none",
-        "Acme.Repo.AuthorizedCreate.sound",
+        "Acme.Repo.createOwnerEq",
+        "Acme.Repo.principalIdPositive",
+        "Acme.Repo.updateOwnerEq",
+        "Acme.Repo.updateHasId",
         "Acme.Repo.widgetOfRow_roundtrip",
         "Acme.Repo.uint64OfInt_roundtrip",
         "Acme.Repo.uint32OfInt_roundtrip",
@@ -95,9 +92,19 @@ lean_assurance_test(
         "Acme.Model.update_preserves_foreign",
         "Acme.Model.delete_removes_named_only",
         "Acme.Model.applyCommand_wellOwned",
-        "acme.v1.Valid.CheckedCreateWidgetRequest.validate_sound",
-        "acme.v1.Valid.CheckedCreateWidgetRequest.validate_complete",
-        "acme.v1.Valid.CheckedDeleteWidgetRequest.decodeValid_sound",
+        "acme.v1.Valid.WidgetService.CreateWidgetValidatePolicy_sound",
+        "acme.v1.Valid.WidgetService.CreateWidgetValidatePolicy_complete",
+        "acme.v1.Valid.WidgetService.GetWidgetValidatePolicy_sound",
+        "acme.v1.Valid.WidgetService.GetWidgetValidatePolicy_complete",
+        "acme.v1.Valid.WidgetService.ListWidgetsValidatePolicy_sound",
+        "acme.v1.Valid.WidgetService.ListWidgetsValidatePolicy_complete",
+        "acme.v1.Valid.WidgetService.UpdateWidgetValidatePolicy_sound",
+        "acme.v1.Valid.WidgetService.UpdateWidgetValidatePolicy_complete",
+        "acme.v1.Valid.WidgetService.DeleteWidgetValidatePolicy_sound",
+        "acme.v1.Valid.WidgetService.DeleteWidgetValidatePolicy_complete",
+        "acme.v1.Valid.CreateWidgetRequest.validate_sound",
+        "acme.v1.Valid.CreateWidgetRequest.validate_complete",
+        "acme.v1.Valid.DeleteWidgetRequest.decodeValid_sound",
     ],
     deps = [
         ":model",

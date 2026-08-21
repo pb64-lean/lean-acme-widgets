@@ -108,7 +108,7 @@ class AcmeLoadTest(unittest.TestCase):
                     for channel in channels
                 ]
                 await asyncio.gather(*(
-                    stub.GetWidget(acme_load.authz_pb2.CheckedGetWidgetRequest())
+                    stub.GetWidget(acme_load.widgets_pb2.GetWidgetRequest())
                     for stub in stubs
                 ))
             finally:
