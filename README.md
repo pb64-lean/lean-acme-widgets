@@ -125,8 +125,9 @@ scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 `acme_server` composes its process with
 [lentil](https://github.com/pb64-lean/lentil): `@[lentil_config "ACME_"]`
 derives one `AcmeConfig` from the `ACME_` environment prefix, `@[lentil]`
-recipes build the postgres connection, repository, bearer-token table, and
-gRPC registry from it, and `make_context AcmeContext` checks that dependency
+recipes autowire the postgres connection, repository, bearer-token table,
+request authenticator, proof-carrying WidgetService, gRPC registry, and
+terminal server instance, and `make_context AcmeContext` checks that dependency
 graph during elaboration and generates the startup code:
 
 | Variable | Type/default | Purpose |

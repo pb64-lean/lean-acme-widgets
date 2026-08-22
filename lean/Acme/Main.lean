@@ -13,11 +13,13 @@ Response compression is opt-in through `ACME_RESPONSE_COMPRESSION`; request
 gzip support remains enabled independently.
 
 Composition is Lentil beans: `@[lentil_config]` loads `AcmeConfig` from the
-`ACME_` environment prefix, `@[lentil]` recipes build the connection,
-repository, token table, and registry, and `make_context` checks the graph at
-elaboration time and generates `AcmeContext.build`. Beans construct in
-registration order (dependencies first), so the TLS invariant below is
-validated before postgres is dialed.
+`ACME_` environment prefix; `@[lentil]` recipes build the connection,
+repository, token table, request authenticator, WidgetService, registry,
+server configuration, and terminal server instance; and `make_context` checks
+the graph at elaboration time and generates `AcmeContext.build`. The
+connection's explicit `TlsFiles` dependency keeps the TLS invariant below
+validated before postgres is dialed even though component recipes arrive
+through transitive imports.
 
 Authentication: WidgetService methods require an `authorization: Bearer
 <token>` header, resolved against a token table BEFORE any request body is
@@ -35,6 +37,13 @@ Graceful listener termination: a line on stdin (or EOF) triggers
 -/
 
 open Lentil EnvConfig
+
+/- Register the imported application factories at the executable composition
+root. `Acme.Auth` and `Acme.Service` are `module` libraries and therefore
+cannot import Lentil's non-module elaboration facade themselves. -/
+attribute [lentil] Acme.Auth.requestAuthenticator
+attribute [lentil] Acme.Service.widgetService
+attribute [lentil] Acme.Service.registry
 
 def defaultDatabaseUrl : String := "postgres://acme@localhost:54398/acme"
 
@@ -81,7 +90,7 @@ structure TlsFiles where
 @[lentil] def tlsFiles (cfg : AcmeConfig) : IO TlsFiles :=
   TlsFiles.mk <$> cfg.tlsFiles.toIO
 
-@[lentil] def connection (cfg : AcmeConfig) : IO Pg.Connection := do
+@[lentil] def connection (_tlsFiles : TlsFiles) (cfg : AcmeConfig) : IO Pg.Connection := do
   let conn ← (Pg.connectUri cfg.databaseUrl).block
   IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
   pure conn
@@ -101,16 +110,26 @@ structure TlsFiles where
     IO.println "auth: built-in demo bearer-token table"
     pure Acme.Auth.demoTable
 
-@[lentil] def registry (cfg : AcmeConfig) (repo : Acme.Repo.Repo)
-    (table : Acme.Auth.TokenTable) : IO Grpc.Registry := do
-  let registry ← match Acme.Service.registry repo table with
-    | .ok registry => pure registry
-    | .error duplicate => throw (IO.userError
-        s!"gRPC registry init: duplicate method {duplicate.name.path}")
-  pure (registry.withResponseCompression cfg.responseCompression)
-
 @[lentil] def serverConfig (cfg : AcmeConfig) : Grpc.Server.Config :=
   { address := Grpc.Server.anyIPv4 cfg.listenPort }
+
+/-- The listener is the terminal bean in this application graph. Lentil owns
+its one-time construction; `main` still owns its shutdown/wait lifecycle
+because Lentil deliberately has no managed-resource or finalizer scope. -/
+@[lentil] def server (cfg : AcmeConfig) (tlsFiles : TlsFiles)
+    (registry : Grpc.Registry) (serverConfig : Grpc.Server.Config) :
+    IO Grpc.Server.Instance := do
+  let registry := registry.withResponseCompression cfg.responseCompression
+  match tlsFiles.files with
+  | some (certificatePath, signingKeyPath) =>
+    let certDer ← IO.FS.readBinFile certificatePath
+    let signingKey ← IO.FS.readBinFile signingKeyPath
+    IO.println "transport: TLS 1.3 (ALPN h2)"
+    Grpc.Server.serveTls registry
+      { certificateChain := #[certDer], signingKey } serverConfig
+  | none =>
+    IO.println "transport: plaintext h2c"
+    Grpc.Server.serve registry serverConfig
 
 validate_beans
 make_context AcmeContext
@@ -125,21 +144,23 @@ def shutdownOnStdin (server : Grpc.Server.Instance) : IO Unit := do
 
 def main : IO Unit := do
   let context ← AcmeContext.build
-  let server ← match context.tlsFiles.files with
-    | some (certificatePath, signingKeyPath) =>
-      let certDer ← IO.FS.readBinFile certificatePath
-      let signingKey ← IO.FS.readBinFile signingKeyPath
-      IO.println "transport: TLS 1.3 (ALPN h2)"
-      Grpc.Server.serveTls context.registry
-        { certificateChain := #[certDer], signingKey } context.serverConfig
-    | none =>
-      IO.println "transport: plaintext h2c"
-      Grpc.Server.serve context.registry context.serverConfig
-  IO.println s!"acme-widgets listening on {server.localAddress}"
-  (← IO.getStdout).flush
-  let shutdownTask ← IO.asTask (shutdownOnStdin server)
-  Grpc.Server.wait server
-  -- If the accept loop ended on its own, make sure the stdin watcher is not
-  -- left blocking a clean exit.
-  IO.cancel shutdownTask
+  let server := context.server
+  try
+    IO.println s!"acme-widgets listening on {server.localAddress}"
+    (← IO.getStdout).flush
+    let shutdownTask ← IO.asTask (shutdownOnStdin server)
+    try
+      Grpc.Server.wait server
+    finally
+      -- If the accept loop ended on its own, do not leave the stdin watcher
+      -- blocking a clean exit.
+      IO.cancel shutdownTask
+  finally
+    -- Lentil shares construction but does not own managed-resource cleanup.
+    -- Defensively stop and drain even if logging or watcher setup failed.
+    try
+      Grpc.Server.shutdown server
+      Grpc.Server.wait server
+    catch _ => pure ()
+    try context.connection.close.block catch _ => pure ()
   IO.println "acme-widgets: listener shut down cleanly"

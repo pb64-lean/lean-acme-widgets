@@ -53,10 +53,9 @@ def main : IO Unit := do
   let signingKey ← IO.FS.readBinFile (← env! "ACME_TLS_SIGNING_KEY")
   let certPem ← IO.FS.readFile (← env! "ACME_TLS_PEM")
 
-  let registry ← match Acme.Service.registry repo Acme.Auth.demoTable with
-    | .ok registry => pure registry
-    | .error duplicate => throw (IO.userError
-        s!"registry: duplicate method {duplicate.name.path}")
+  let registry ← Acme.Service.registry
+    (Acme.Auth.requestAuthenticator Acme.Auth.demoTable)
+    (Acme.Service.widgetService repo)
   let server ← Grpc.Server.serveTls registry
     { certificateChain := #[certDer], signingKey }
     { address := Grpc.Server.loopback 0 }

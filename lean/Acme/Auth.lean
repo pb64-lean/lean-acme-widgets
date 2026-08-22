@@ -159,8 +159,11 @@ def authenticate (table : TokenTable) (metadata : Grpc.Metadata) :
     | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 
 /-- The pure pre-body authenticator consumed by generated protected-service
-registration. grpc-lean wraps successful results in `Grpc.Authenticated`. -/
-def requestAuthenticator (table : TokenTable) : Grpc.RequestAuthenticator Principal :=
+registration. grpc-lean wraps successful results in `Grpc.Authenticated`.
+The immutable token-table snapshot and its authenticator are process-scoped,
+so Lentil constructs and shares this adapter once. -/
+def requestAuthenticator (table : TokenTable) :
+    Grpc.RequestAuthenticator Principal :=
   .pure (authenticate table)
 
 end Auth

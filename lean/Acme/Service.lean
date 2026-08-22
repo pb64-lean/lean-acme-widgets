@@ -38,56 +38,47 @@ def repoM (action : IO (Except Repo.Error α)) : Grpc.GrpcM α := do
   | .ok value => pure value
   | .error error => throw (Grpc.Status.internal (toString error))
 
-def create (repo : Repo.Repo) :
-    Grpc.TypedUnaryHandler Valid.WidgetService.CreateWidgetCall WidgetResponse :=
-  fun call => do
+/-- Business handlers over generated authentication/authorization capabilities. -/
+def widgetService (repo : Repo.Repo) : Valid.WidgetService := {
+  handleCreateWidget := fun call => do
     let id ← repoM (repo.insertWidget call)
     pure { widget := some { call.request.widget.toBase with id } }
-
-def get (repo : Repo.Repo) :
-    Grpc.TypedUnaryHandler Valid.WidgetService.GetWidgetCall WidgetResponse :=
-  fun call => do
+  handleGetWidget := fun call => do
     match ← repoM (repo.getWidget call) with
     | some widget => pure { widget := some widget }
     | none => throw (Grpc.Status.error .notFound "widget not found")
-
-def list (repo : Repo.Repo) :
-    Grpc.TypedUnaryHandler Valid.WidgetService.ListWidgetsCall ListWidgetsResponse :=
-  fun call => do
+  handleListWidgets := fun call => do
     let widgets ← repoM (repo.listWidgets call)
     pure { widgets }
-
-def update (repo : Repo.Repo) :
-    Grpc.TypedUnaryHandler Valid.WidgetService.UpdateWidgetCall WidgetResponse :=
-  fun call => do
+  handleUpdateWidget := fun call => do
     let updated ← repoM (repo.updateWidget call)
     if !updated then
       throw (Grpc.Status.error .notFound "widget not found for this owner")
     pure { widget := some call.request.widget.toBase }
-
-def delete (repo : Repo.Repo) :
-    Grpc.TypedUnaryHandler Valid.WidgetService.DeleteWidgetCall DeleteWidgetResponse :=
-  fun call => do
+  handleDeleteWidget := fun call => do
     let deleted ← repoM (repo.deleteWidget call)
     pure { deleted }
-
-/-- Business handlers over generated authentication/authorization capabilities. -/
-def widgetService (repo : Repo.Repo) : Valid.WidgetService := {
-  handleCreateWidget := create repo
-  handleGetWidget := get repo
-  handleListWidgets := list repo
-  handleUpdateWidget := update repo
-  handleDeleteWidget := delete repo
 }
 
 /-- Atomically register the protected service and then leave reflection
-public. A duplicate generated RPC path is a startup error; callers must handle
-it explicitly rather than receiving a partially populated registry. -/
-def registry (repo : Repo.Repo) (table : Auth.TokenTable) :
-    Except Grpc.DuplicateMethod Grpc.Registry := do
-  let registry ← Valid.WidgetService.register Grpc.Registry.empty
-    (Auth.requestAuthenticator table) (widgetService repo)
+public. Keeping the structured duplicate-method result makes this reusable by
+composition roots other than the Acme executable. -/
+def register
+    (authenticator : Grpc.RequestAuthenticator Auth.Principal)
+    (service : Valid.WidgetService) : Except Grpc.DuplicateMethod Grpc.Registry := do
+  let registry ← Valid.WidgetService.register Grpc.Registry.empty authenticator service
   pure (Grpc.Services.Reflection.register registry)
+
+/-- Process-singleton registry recipe. Lentil supplies the shared authenticator
+and handler table; a duplicate generated RPC path aborts startup rather than
+exposing a partially populated registry. -/
+def registry
+    (authenticator : Grpc.RequestAuthenticator Auth.Principal)
+    (service : Valid.WidgetService) : IO Grpc.Registry :=
+  match register authenticator service with
+  | .ok registry => pure registry
+  | .error duplicate => throw (IO.userError
+      s!"gRPC registry init: duplicate method {duplicate.name.path}")
 
 end Service
 end Acme
