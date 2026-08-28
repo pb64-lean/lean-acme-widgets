@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: acme
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "54398:5432"
+      - "${ACME_POSTGRES_PORT:-54398}:5432"
     volumes:
       - ./db/migrations/0001_schema.sql:/docker-entrypoint-initdb.d/0001_schema.sql:ro
       - ./db/fixtures/0001_seed.sql:/docker-entrypoint-initdb.d/0002_seed.sql:ro
@@ -22,7 +22,7 @@ services:
       POSTGRES_USER: acme
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "54397:5432"
+      - "${ACME_POSTGRES_TLS_PORT:-54397}:5432"
     volumes:
       - ./db/migrations/0001_schema.sql:/docker-entrypoint-initdb.d/0001_schema.sql:ro
       - ./db/fixtures/0001_seed.sql:/docker-entrypoint-initdb.d/0002_seed.sql:ro

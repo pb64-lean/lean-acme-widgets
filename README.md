@@ -6,8 +6,9 @@ Example software system for the pure-Lean service ecosystem: the **Acme
 Widgets** service, tying the sibling repositories together end to end —
 
 - `rules_lean` — Bazel build rules for Lean 4
-- `grpc-lean` (`rules_lean_grpc`) — proto/gRPC codegen, a pure-Lean gRPC
-  runtime, and TLS 1.3 (client + server termination)
+- `grpc-lean` (`rules_lean_grpc`) — proto/gRPC codegen and the pure-Lean gRPC
+  semantic runtime
+- `http2-lean` — the published HTTP/2, HPACK, h2c, and TLS transport foundation
 - `protovalidate-lean` — buf.validate CEL annotations compiled to Lean
   **refinement types**
 - `lean-pgx` — DDL/query analysis, generated checked records and runners,
@@ -92,12 +93,12 @@ an ordinal rank or silently expands role implications.
 ## Getting the source
 
 The seven co-developed ecosystem repositories must be checked out side by
-side — `MODULE.bazel` wires every sibling via Bzlmod `local_path_override`,
+side — `MODULE.bazel` wires those siblings via Bzlmod `local_path_override`,
 and because transitive overrides are ignored for non-root modules, this root
-workspace re-declares all of them. `lentil` is the exception: Bazel fetches
-it remotely via `archive_override` from a pinned GitHub commit, so a sibling
-checkout is only needed for the Lake/editor project model (`lakefile.lean`
-requires `../lentil`):
+workspace re-declares all of them. Bazel fetches `http2-lean` from its pinned
+public release and `lentil` from a pinned GitHub commit. A `lentil` sibling is
+needed only for the Lake/editor project model (`lakefile.lean` requires
+`../lentil`):
 
 ```sh
 for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lean-acme-widgets; do
@@ -121,6 +122,10 @@ scripts/acme-e2e.sh              # compose postgres + server + grpcurl, 24 check
 scripts/acme-e2e.sh tls          # ... with the pg-lean → postgres link over TLS (verify-full)
 scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
+
+The Compose PostgreSQL ports default to `54398` (plain) and `54397` (TLS).
+Set `ACME_POSTGRES_PORT` or `ACME_POSTGRES_TLS_PORT` when either host port is
+already in use.
 
 `acme_server` composes its process with
 [lentil](https://github.com/pb64-lean/lentil): `@[lentil_config "ACME_"]`

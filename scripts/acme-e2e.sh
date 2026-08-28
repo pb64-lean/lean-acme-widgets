@@ -12,6 +12,7 @@ ADDR="localhost:${PORT}"
 SERVER_PID=""
 FAILS=0
 PG_SERVICE="postgres"
+PG_PORT="${ACME_POSTGRES_PORT:-54398}"
 COMPOSE=(docker compose)
 CTL_FIFO=""
 
@@ -25,40 +26,41 @@ trap cleanup EXIT
 bazel build //lean/Acme:acme_server
 
 if [[ "$MODE" == "tls" ]]; then
-  # Throwaway root + localhost leaf; postgres accepts hostssl ONLY, and the
-  # client connects with sslmode=verify-full against the generated root.
+  # Fresh throwaway root + localhost leaf; postgres accepts hostssl ONLY, and
+  # the client connects with sslmode=verify-full against the generated root.
   mkdir -p .certs
-  if [[ ! -f .certs/root.crt ]]; then
-    openssl req -x509 -newkey rsa:2048 -nodes -sha256 \
-      -subj /CN=acme-e2e-root -days 2 \
-      -addext basicConstraints=critical,CA:TRUE,pathlen:0 \
-      -addext keyUsage=critical,keyCertSign,cRLSign \
-      -keyout .certs/root.key -out .certs/root.crt >/dev/null 2>&1
-    openssl req -new -newkey rsa:2048 -nodes -sha256 -subj /CN=localhost \
-      -keyout .certs/server.key -out .certs/server.csr >/dev/null 2>&1
-    cat > .certs/server.ext <<'EXT'
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 \
+    -subj /CN=acme-e2e-root -days 2 \
+    -addext basicConstraints=critical,CA:TRUE,pathlen:0 \
+    -addext keyUsage=critical,keyCertSign,cRLSign \
+    -keyout .certs/root.key -out .certs/root.crt >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -nodes -sha256 -subj /CN=localhost \
+    -keyout .certs/server.key -out .certs/server.csr >/dev/null 2>&1
+  cat > .certs/server.ext <<'EXT'
 [server_ext]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = DNS:localhost,IP:127.0.0.1
 EXT
-    openssl x509 -req -sha256 -in .certs/server.csr \
-      -CA .certs/root.crt -CAkey .certs/root.key -CAcreateserial -days 2 \
-      -extfile .certs/server.ext -extensions server_ext \
-      -out .certs/server.crt >/dev/null 2>&1
-  fi
+  openssl x509 -req -sha256 -in .certs/server.csr \
+    -CA .certs/root.crt -CAkey .certs/root.key -CAcreateserial -days 2 \
+    -extfile .certs/server.ext -extensions server_ext \
+    -out .certs/server.crt >/dev/null 2>&1
   cat > .certs/pg_hba.conf <<'HBA'
 local   all all           trust
 hostssl all all 0.0.0.0/0 trust
 hostssl all all ::0/0     trust
 HBA
   PG_SERVICE="postgres-tls"
+  PG_PORT="${ACME_POSTGRES_TLS_PORT:-54397}"
   COMPOSE=(docker compose --profile tls)
-  export ACME_DATABASE_URL="postgres://acme@localhost:54397/acme?sslmode=verify-full&sslrootcert=${PWD}/.certs/root.crt"
+  export ACME_DATABASE_URL="postgres://acme@localhost:${PG_PORT}/acme?sslmode=verify-full&sslrootcert=${PWD}/.certs/root.crt"
+else
+  export ACME_DATABASE_URL="${ACME_DATABASE_URL:-postgres://acme@localhost:${PG_PORT}/acme}"
 fi
 
-"${COMPOSE[@]}" up -d "$PG_SERVICE" >/dev/null
+"${COMPOSE[@]}" up -d --force-recreate "$PG_SERVICE" >/dev/null
 for _ in $(seq 1 120); do
   "${COMPOSE[@]}" exec "$PG_SERVICE" pg_isready -h 127.0.0.1 -U acme >/dev/null 2>&1 && break
   sleep 0.5

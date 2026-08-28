@@ -134,21 +134,21 @@ private def TokenTable.lookupBearerHeader? (table : TokenTable)
     none
 
 /-- Extract the token of an `authorization: Bearer <token>` header. -/
-def bearerToken? (metadata : Grpc.Metadata) : Option String :=
+def bearerToken? (metadata : _root_.Http2.Headers) : Option String :=
   match metadata.getLast? "authorization" with
   | some v => if v.startsWith "Bearer " then some (v.drop 7).toString else none
   | none => none
 
 /-- Select the same last bearer header as `bearerToken?`, but retain the
 original header so the authentication lookup can compare its suffix in place. -/
-private def bearerHeader? (metadata : Grpc.Metadata) : Option String :=
+private def bearerHeader? (metadata : _root_.Http2.Headers) : Option String :=
   match metadata.getLast? "authorization" with
   | some v => if v.startsWith "Bearer " then some v else none
   | none => none
 
 /-- Authenticate a request's headers. Missing or unknown credentials are
 UNAUTHENTICATED (gRPC: the caller could not be identified at all). -/
-def authenticate (table : TokenTable) (metadata : Grpc.Metadata) :
+def authenticate (table : TokenTable) (metadata : _root_.Http2.Headers) :
     Except Grpc.Status Principal :=
   match bearerHeader? metadata with
   | none => .error (Grpc.Status.error .unauthenticated

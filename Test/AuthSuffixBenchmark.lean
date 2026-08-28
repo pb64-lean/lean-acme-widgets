@@ -7,7 +7,7 @@ Run one mode/metadata size per process under an instruction counter.
 -/
 
 private def authenticateCopiedSuffix (table : Acme.Auth.TokenTable)
-    (metadata : Grpc.Metadata) : Except Grpc.Status Acme.Auth.Principal :=
+    (metadata : _root_.Http2.Headers) : Except Grpc.Status Acme.Auth.Principal :=
   match Acme.Auth.bearerToken? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
@@ -16,17 +16,17 @@ private def authenticateCopiedSuffix (table : Acme.Auth.TokenTable)
     | some principal => .ok principal
     | none => .error (Grpc.Status.error .unauthenticated "unknown bearer token")
 
-private def metadataOfSize (size : Nat) : Grpc.Metadata := Id.run do
-  let mut metadata := Grpc.Metadata.empty
+private def metadataOfSize (size : Nat) : _root_.Http2.Headers := Id.run do
+  let mut metadata := _root_.Http2.Headers.empty
   for index in [0:size - 1] do
     metadata := metadata.insert s!"x-benchmark-{index}" "ignored"
   metadata := metadata.insert "authorization" "Bearer acme-editor-8"
   return metadata
 
 private def runIterations
-    (authenticate : Acme.Auth.TokenTable → Grpc.Metadata →
+    (authenticate : Acme.Auth.TokenTable → _root_.Http2.Headers →
       Except Grpc.Status Acme.Auth.Principal)
-    (table : Acme.Auth.TokenTable) (metadata : Grpc.Metadata)
+    (table : Acme.Auth.TokenTable) (metadata : _root_.Http2.Headers)
     (iterations : Nat) : IO UInt64 := do
   let mut checksum : UInt64 := 0
   for _ in [0:iterations] do

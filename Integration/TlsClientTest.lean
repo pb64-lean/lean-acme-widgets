@@ -70,7 +70,7 @@ def main : IO Unit := do
 
   let path := "/acme.v1.WidgetService/CreateWidget"
   let bearer (token : String) : Grpc.Client.CallOptions :=
-    { metadata := Grpc.Metadata.empty.insert "authorization" s!"Bearer {token}" }
+    { metadata := _root_.Http2.Headers.empty.insert "authorization" s!"Bearer {token}" }
 
   -- editor creating its own widget: authenticated + authorized, persisted
   let okBytes ← encode! (createRequest 7).encode

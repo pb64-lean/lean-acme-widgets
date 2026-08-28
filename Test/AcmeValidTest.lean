@@ -94,10 +94,10 @@ def main : IO Unit := do
 
   -- ── authentication: bearer-token table ─────────────────────────────────
   let table := Acme.Auth.demoTable
-  let headers (auth? : Option String) : Grpc.Metadata :=
+  let headers (auth? : Option String) : _root_.Http2.Headers :=
     match auth? with
-    | some v => Grpc.Metadata.empty.insert "authorization" v
-    | none => Grpc.Metadata.empty
+    | some v => _root_.Http2.Headers.empty.insert "authorization" v
+    | none => _root_.Http2.Headers.empty
   let authEditor7 ← match Acme.Auth.authenticate table (headers (some "Bearer acme-editor-7")) with
     | .ok p => pure p
     | .error s => throw (IO.userError s!"editor-7 token rejected: {s.messageD}")

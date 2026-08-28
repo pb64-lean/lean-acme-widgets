@@ -18,8 +18,8 @@ private def expect (condition : Bool) (failure : String) : IO Unit := do
 private def fail (failure : String) : IO α :=
   throw (IO.userError failure)
 
-private def metadata (token : String) : Grpc.Metadata :=
-  Grpc.Metadata.empty.insert "authorization" s!"Bearer {token}"
+private def metadata (token : String) : _root_.Http2.Headers :=
+  _root_.Http2.Headers.empty.insert "authorization" s!"Bearer {token}"
 
 private def encodeCreate (request : CreateWidgetRequest) : IO ByteArray :=
   match request.encode with
@@ -113,7 +113,7 @@ def main : IO Unit := do
     | fail "generated registration did not expose its pure pre-body resolver"
 
   -- Authentication is a header-stage decision: no request bytes are needed.
-  expectHeaderRejection entry (resolve Grpc.Metadata.empty)
+  expectHeaderRejection entry (resolve _root_.Http2.Headers.empty)
     "missing authorization" "missing token"
   expectHeaderRejection entry (resolve (metadata "unknown"))
     "unknown bearer token" "unknown token"

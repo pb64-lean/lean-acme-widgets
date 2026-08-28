@@ -7,7 +7,7 @@ value, copy the suffix returned by `bearerToken?`, then use `TokenTable.lookup?`
 -/
 
 private def referenceAuthenticate (table : Acme.Auth.TokenTable)
-    (metadata : Grpc.Metadata) : Except Grpc.Status Acme.Auth.Principal :=
+    (metadata : _root_.Http2.Headers) : Except Grpc.Status Acme.Auth.Principal :=
   match Acme.Auth.bearerToken? metadata with
   | none => .error (Grpc.Status.error .unauthenticated
       "missing authorization bearer token")
@@ -22,12 +22,12 @@ private inductive Expected where
 
 private structure Fixture where
   label : String
-  metadata : Grpc.Metadata
+  metadata : _root_.Http2.Headers
   expected : Expected
 
-private def authorizationValues (values : Array String) : Grpc.Metadata :=
+private def authorizationValues (values : Array String) : _root_.Http2.Headers :=
   values.foldl (fun metadata value => metadata.insert "authorization" value)
-    Grpc.Metadata.empty
+    _root_.Http2.Headers.empty
 
 private def sameAuthentication
     (left right : Except Grpc.Status Acme.Auth.Principal) : Bool :=
@@ -68,7 +68,7 @@ def main : IO Unit := do
   let nulToken := "nul" ++ String.singleton (Char.ofNat 0) ++ "tail"
   let nulMismatch := "nul" ++ String.singleton (Char.ofNat 0) ++ "tails"
   let longToken := String.ofList (List.replicate 128 'z')
-  let noAuthorization := Grpc.Metadata.empty
+  let noAuthorization := _root_.Http2.Headers.empty
     |>.insert "x-filler" "Bearer acme-editor-7"
   let fixtures : Array Fixture := #[
     { label := "missing", metadata := noAuthorization,
