@@ -1,8 +1,8 @@
 name: e2e
 
 # End-to-end suites on the docker-capable self-hosted runner. The three
-# scripts share fixed host ports (54397/54398), the compose project name,
-# and .certs/ state, so they run strictly serially in ONE job; the single
+# scripts share a gRPC listener port, the compose project name, and .certs/
+# state, so they run strictly serially in ONE job; the single
 # lean-integration runner per machine serializes whole runs.
 # NEVER add pull_request here: these jobs run on self-hosted runners.
 

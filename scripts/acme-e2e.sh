@@ -12,7 +12,10 @@ ADDR="localhost:${PORT}"
 SERVER_PID=""
 FAILS=0
 PG_SERVICE="postgres"
-PG_PORT="${ACME_POSTGRES_PORT:-54398}"
+# Docker allocates the test port atomically; developer services can keep the
+# Compose defaults without conflicting with this run. Explicit ports still win.
+export ACME_POSTGRES_PORT="${ACME_POSTGRES_PORT:-0}"
+export ACME_POSTGRES_TLS_PORT="${ACME_POSTGRES_TLS_PORT:-0}"
 COMPOSE=(docker compose)
 CTL_FIFO=""
 
@@ -53,14 +56,18 @@ hostssl all all 0.0.0.0/0 trust
 hostssl all all ::0/0     trust
 HBA
   PG_SERVICE="postgres-tls"
-  PG_PORT="${ACME_POSTGRES_TLS_PORT:-54397}"
   COMPOSE=(docker compose --profile tls)
+fi
+
+"${COMPOSE[@]}" up -d --force-recreate "$PG_SERVICE" >/dev/null
+PG_PORT="$("${COMPOSE[@]}" port "$PG_SERVICE" 5432 | sed -n '1p')"
+PG_PORT="${PG_PORT##*:}"
+[[ "$PG_PORT" =~ ^[0-9]+$ && "$PG_PORT" -gt 0 ]]
+if [[ "$MODE" == "tls" ]]; then
   export ACME_DATABASE_URL="postgres://acme@localhost:${PG_PORT}/acme?sslmode=verify-full&sslrootcert=${PWD}/.certs/root.crt"
 else
   export ACME_DATABASE_URL="${ACME_DATABASE_URL:-postgres://acme@localhost:${PG_PORT}/acme}"
 fi
-
-"${COMPOSE[@]}" up -d --force-recreate "$PG_SERVICE" >/dev/null
 for _ in $(seq 1 120); do
   "${COMPOSE[@]}" exec "$PG_SERVICE" pg_isready -h 127.0.0.1 -U acme >/dev/null 2>&1 && break
   sleep 0.5

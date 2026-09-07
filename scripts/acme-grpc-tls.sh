@@ -7,7 +7,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PG_PORT="${ACME_POSTGRES_PORT:-54398}"
+# Keep test databases independent of services using the Compose default port.
+export ACME_POSTGRES_PORT="${ACME_POSTGRES_PORT:-0}"
 
 cleanup() { docker compose down -v >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -24,6 +25,9 @@ openssl x509 -in .certs/grpc.crt.pem -outform DER -out .certs/grpc.der
 openssl pkey -in .certs/grpc.key.pem -outform DER | tail -c 32 > .certs/grpc.seed
 
 docker compose up -d --force-recreate postgres >/dev/null
+PG_PORT="$(docker compose port postgres 5432 | sed -n '1p')"
+PG_PORT="${PG_PORT##*:}"
+[[ "$PG_PORT" =~ ^[0-9]+$ && "$PG_PORT" -gt 0 ]]
 for _ in $(seq 1 120); do
   docker compose exec postgres pg_isready -h 127.0.0.1 -U acme >/dev/null 2>&1 && break
   sleep 0.5

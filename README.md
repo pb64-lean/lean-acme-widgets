@@ -124,8 +124,9 @@ scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
 
 The Compose PostgreSQL ports default to `54398` (plain) and `54397` (TLS).
-Set `ACME_POSTGRES_PORT` or `ACME_POSTGRES_TLS_PORT` when either host port is
-already in use.
+Set `ACME_POSTGRES_PORT` or `ACME_POSTGRES_TLS_PORT` to choose specific ports.
+The end-to-end scripts allocate free PostgreSQL ports through Docker unless
+these variables are explicitly set.
 
 `acme_server` composes its process with
 [lentil](https://github.com/pb64-lean/lentil): `@[lentil_config "ACME_"]`
