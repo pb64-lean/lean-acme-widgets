@@ -354,7 +354,7 @@ class ManagedStack:
         environment["ACME_LISTEN_PORT"] = str(self.port)
         self.server = subprocess.Popen(
             [str(self.server_binary)],
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
             env=environment,
@@ -367,13 +367,10 @@ class ManagedStack:
 
     def close(self) -> None:
         if self.server is not None and self.server.poll() is None:
-            assert self.server.stdin is not None
             try:
-                self.server.stdin.write(b"quit\n")
-                self.server.stdin.flush()
-                self.server.stdin.close()
+                self.server.terminate()
                 self.server.wait(timeout=10)
-            except (BrokenPipeError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
                 self.server.terminate()
                 try:
                     self.server.wait(timeout=3)

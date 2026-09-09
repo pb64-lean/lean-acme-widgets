@@ -17,16 +17,16 @@ PG_SERVICE="postgres"
 export ACME_POSTGRES_PORT="${ACME_POSTGRES_PORT:-0}"
 export ACME_POSTGRES_TLS_PORT="${ACME_POSTGRES_TLS_PORT:-0}"
 COMPOSE=(docker compose)
-CTL_FIFO=""
 
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" >/dev/null 2>&1 || true; fi
-  if [[ -n "$CTL_FIFO" ]]; then exec 9>&- 2>/dev/null || true; rm -f "$CTL_FIFO"; fi
   docker compose --profile tls down -v >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-bazel build //lean/Acme:acme_server
+if [[ "${ACME_SKIP_BUILD:-0}" != "1" ]]; then
+  bazel build //lean/Acme:acme_server --jobs="${ACME_BUILD_JOBS:-4}"
+fi
 
 if [[ "$MODE" == "tls" ]]; then
   # Fresh throwaway root + localhost leaf; postgres accepts hostssl ONLY, and
@@ -74,14 +74,12 @@ for _ in $(seq 1 120); do
 done
 "${COMPOSE[@]}" exec "$PG_SERVICE" pg_isready -h 127.0.0.1 -U acme >/dev/null
 
-CTL_FIFO="$(mktemp -u /tmp/acme-ctl.XXXXXX)"
-mkfifo "$CTL_FIFO"
-ACME_LISTEN_PORT="$PORT" bazel-bin/lean/Acme/acme_server < "$CTL_FIFO" &
+ACME_LISTEN_PORT="$PORT" bazel-bin/lean/Acme/acme_server </dev/null &
 SERVER_PID=$!
-exec 9>"$CTL_FIFO"   # hold the write end open so the server's stdin stays live
 
 for _ in $(seq 1 60); do
-  grpcurl -plaintext "$ADDR" list >/dev/null 2>&1 && break
+  if grpcurl -plaintext -d '{"service":"readiness"}' "$ADDR" grpc.health.v1.Health/Check \
+      2>/dev/null | grep -q '"status": "SERVING"'; then break; fi
   sleep 0.5
 done
 
@@ -111,6 +109,11 @@ expect_contains() {
   local label="$1" out="$2" needle="$3"
   if grep -q "$needle" <<<"$out"; then pass "$label"; else fail "$label" "$out"; fi
 }
+
+for probe in readiness liveness; do
+  OUT=$(grpcurl -plaintext -d "{\"service\":\"$probe\"}" "$ADDR" grpc.health.v1.Health/Check) || true
+  expect_contains "health.$probe" "$OUT" '"status": "SERVING"'
+done
 
 # Bearer tokens resolve to server-side Principals with flat string roles; no
 # principal or authorization envelope appears in an RPC request body.
@@ -196,10 +199,9 @@ if [[ "$MODE" == "tls" ]]; then
   fi
 fi
 
-# Graceful listener termination: trigger shutdown over the control FIFO and
+# Graceful listener termination: deliver a real process termination signal and
 # assert the process drains and exits 0.
-echo quit >&9
-exec 9>&-
+kill -TERM "$SERVER_PID"
 TERM_OK=1
 for _ in $(seq 1 40); do
   if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then TERM_OK=0; break; fi
@@ -210,7 +212,8 @@ if [[ "$TERM_OK" == "0" ]]; then
   else fail "listener.graceful_shutdown" "server exited non-zero"; fi
 else
   fail "listener.graceful_shutdown" "server did not terminate after shutdown"
-  kill "$SERVER_PID" >/dev/null 2>&1 || true
+  kill -KILL "$SERVER_PID" >/dev/null 2>&1 || true
+  wait "$SERVER_PID" >/dev/null 2>&1 || true
 fi
 SERVER_PID=""
 

@@ -80,5 +80,15 @@ def registry
   | .error duplicate => throw (IO.userError
       s!"gRPC registry init: duplicate method {duplicate.name.path}")
 
+/-- Composition roots adding managed standard services register reflection
+after those services, so discovery sees the final service set. -/
+def registryCore
+    (authenticator : Grpc.RequestAuthenticator Auth.Principal)
+    (service : Valid.WidgetService) : IO Grpc.Registry :=
+  match Valid.WidgetService.register Grpc.Registry.empty authenticator service with
+  | .ok registry => pure registry
+  | .error duplicate => throw (IO.userError
+      s!"gRPC registry init: duplicate method {duplicate.name.path}")
+
 end Service
 end Acme

@@ -1,0 +1,11 @@
+{"version": "1.2.0", "packages": [
+  {
+    "type": "path",
+    "scope": "",
+    "name": "«http2-lean»",
+    "manifestFile": "lake-manifest.json",
+    "inherited": false,
+    "dir": "../http2-lean",
+    "configFile": "lakefile.lean"
+  }
+]}

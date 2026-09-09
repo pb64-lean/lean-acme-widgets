@@ -3,6 +3,12 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_lean//lean:defs.bzl", "lean_binary", "lean_test")
 
 lean_test(
+    name = "lifecycle_test",
+    srcs = ["LifecycleTest.lean"],
+    deps = ["//lean/Acme:lifecycle"],
+)
+
+lean_test(
     name = "smoke_test",
     srcs = ["SmokeTest.lean"],
     deps = ["//lean:acme"],

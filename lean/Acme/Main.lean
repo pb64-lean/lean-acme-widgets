@@ -1,8 +1,12 @@
 import Acme.Auth
 import Acme.Repo
 import Acme.Service
+import Acme.Lifecycle
 import Lentil
+import Lentil.Signals
 import Grpc
+import Grpc.Services.Health
+import Grpc.Services.StandardDescriptors
 import Pg
 
 /-!
@@ -15,8 +19,8 @@ gzip support remains enabled independently.
 Composition is Lentil beans: `@[lentil_config]` loads `AcmeConfig` from the
 `ACME_` environment prefix; `@[lentil]` recipes build the connection,
 repository, token table, request authenticator, WidgetService, registry,
-server configuration, and terminal server instance; and `make_context` checks
-the graph at elaboration time and generates `AcmeContext.build`. The
+server configuration, and terminal server instance; `make_managed_context`
+checks the graph and generates an owned `AcmeContext.build`. The
 connection's explicit `TlsFiles` dependency keeps the TLS invariant below
 validated before postgres is dialed even though component recipes arrive
 through transitive imports.
@@ -32,8 +36,9 @@ TLS termination: if `ACME_TLS_CERTIFICATE` (DER leaf certificate path) and
 listener serves gRPC over TLS 1.3 (ALPN "h2"); otherwise plaintext h2c. A
 partial TLS pair is rejected as a configuration error.
 
-Graceful listener termination: a line on stdin (or EOF) triggers
-`Grpc.Server.shutdown`, after which `wait` drains in-flight RPCs and returns.
+Graceful listener termination: SIGINT or SIGTERM drops readiness, stops
+admission, joins the server wait task, and releases PostgreSQL last. Stdin
+is not watched: cancelling a blocking stdin read cannot provide joined cleanup.
 -/
 
 open Lentil EnvConfig
@@ -43,7 +48,7 @@ root. `Acme.Auth` and `Acme.Service` are `module` libraries and therefore
 cannot import Lentil's non-module elaboration facade themselves. -/
 attribute [lentil] Acme.Auth.requestAuthenticator
 attribute [lentil] Acme.Service.widgetService
-attribute [lentil] Acme.Service.registry
+attribute [lentil] Acme.Service.registryCore
 
 def defaultDatabaseUrl : String := "postgres://acme@localhost:54398/acme"
 
@@ -90,10 +95,19 @@ structure TlsFiles where
 @[lentil] def tlsFiles (cfg : AcmeConfig) : IO TlsFiles :=
   TlsFiles.mk <$> cfg.tlsFiles.toIO
 
-@[lentil] def connection (_tlsFiles : TlsFiles) (cfg : AcmeConfig) : IO Pg.Connection := do
+@[lentil_managed] def terminationSignals : IO (Resource TerminationSignals) :=
+  TerminationSignals.acquire
+
+@[lentil_managed] def connection (_tlsFiles : TlsFiles) (_signals : TerminationSignals)
+    (cfg : AcmeConfig) : IO (Resource Pg.Connection) := do
   let conn ← (Pg.connectUri cfg.databaseUrl).block
-  IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
-  pure conn
+  try
+    IO.println s!"connected to postgres ({(← (conn.parameter? "server_version").block).getD "?"})"
+    return { value := conn, hooks := { release := conn.close.block } }
+  catch error =>
+    try conn.close.block catch cleanup =>
+      throw <| IO.userError s!"{error}; connection cleanup: {cleanup}"
+    throw error
 
 @[lentil] def repository (conn : Pg.Connection) : IO Acme.Repo.Repo := do
   match ← Acme.Repo.open' conn with
@@ -113,14 +127,18 @@ structure TlsFiles where
 @[lentil] def serverConfig (cfg : AcmeConfig) : Grpc.Server.Config :=
   { address := Grpc.Server.anyIPv4 cfg.listenPort }
 
-/-- The listener is the terminal bean in this application graph. Lentil owns
-its one-time construction; `main` still owns its shutdown/wait lifecycle
-because Lentil deliberately has no managed-resource or finalizer scope. -/
-@[lentil] def server (cfg : AcmeConfig) (tlsFiles : TlsFiles)
-    (registry : Grpc.Registry) (serverConfig : Grpc.Server.Config) :
-    IO Grpc.Server.Instance := do
-  let registry := registry.withResponseCompression cfg.responseCompression
-  match tlsFiles.files with
+/-- Liveness stays serving while requests drain; readiness is withdrawn before
+listener shutdown. Empty-name health follows readiness for standard probes. -/
+@[lentil_managed] def health : IO (Resource Grpc.Services.Health.Service) := do
+  Acme.Lifecycle.healthResource
+
+/-- Resources are registered dependency-first and cleaned in reversed phases. -/
+@[lentil_managed] def server (cfg : AcmeConfig) (tlsFiles : TlsFiles)
+    (registry : Grpc.Registry) (serverConfig : Grpc.Server.Config)
+    (health : Grpc.Services.Health.Service) : IO (Resource Grpc.Server.Instance) := do
+  let registry := health.registerWith (registry.withResponseCompression cfg.responseCompression)
+    |> Grpc.Services.Reflection.registerWith { files := Grpc.Services.Health.fileDescriptors }
+  let listener ← match tlsFiles.files with
   | some (certificatePath, signingKeyPath) =>
     let certDer ← IO.FS.readBinFile certificatePath
     let signingKey ← IO.FS.readBinFile signingKeyPath
@@ -130,37 +148,23 @@ because Lentil deliberately has no managed-resource or finalizer scope. -/
   | none =>
     IO.println "transport: plaintext h2c"
     Grpc.Server.serve registry serverConfig
+  return { value := listener, hooks := {
+    quiesce := Acme.Lifecycle.quiesce health (Grpc.Server.shutdown listener)
+    drain := Grpc.Server.wait listener none } }
 
 validate_beans
-make_context AcmeContext
-
-/-- Wait for a shutdown trigger (a stdin line or EOF), then stop the listener
-and drain. Runs in its own task so the main thread can `wait`. -/
-def shutdownOnStdin (server : Grpc.Server.Instance) : IO Unit := do
-  let stdin ← IO.getStdin
-  let _ ← stdin.getLine   -- returns "" on EOF
-  IO.eprintln "acme-widgets: shutting down listener"
-  Grpc.Server.shutdown server
+make_managed_context AcmeContext
 
 def main : IO Unit := do
-  let context ← AcmeContext.build
-  let server := context.server
-  try
+  let app ← AcmeContext.build
+  app.use fun context => do
+    let server := context.server
+    let waiter ← app.scope.spawn "server wait" (Grpc.Server.wait server none) (pure ())
+    Acme.Lifecycle.markReady context.health
+    app.scope.markReady
     IO.println s!"acme-widgets listening on {server.localAddress}"
     (← IO.getStdout).flush
-    let shutdownTask ← IO.asTask (shutdownOnStdin server)
-    try
-      Grpc.Server.wait server
-    finally
-      -- If the accept loop ended on its own, do not leave the stdin watcher
-      -- blocking a clean exit.
-      IO.cancel shutdownTask
-  finally
-    -- Lentil shares construction but does not own managed-resource cleanup.
-    -- Defensively stop and drain even if logging or watcher setup failed.
-    try
-      Grpc.Server.shutdown server
-      Grpc.Server.wait server
-    catch _ => pure ()
-    try context.connection.close.block catch _ => pure ()
+    while !(← IO.hasFinished waiter) && (← context.terminationSignals.poll).isNone do
+      IO.sleep 20
+    IO.eprintln "acme-widgets: shutting down listener"
   IO.println "acme-widgets: listener shut down cleanly"

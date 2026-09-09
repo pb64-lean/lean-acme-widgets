@@ -92,16 +92,15 @@ an ordinal rank or silently expands role implications.
 
 ## Getting the source
 
-The seven co-developed ecosystem repositories must be checked out side by
+The eight co-developed ecosystem repositories must be checked out side by
 side — `MODULE.bazel` wires those siblings via Bzlmod `local_path_override`,
 and because transitive overrides are ignored for non-root modules, this root
 workspace re-declares all of them. Bazel fetches `http2-lean` from its pinned
-public release and `lentil` from a pinned GitHub commit. A `lentil` sibling is
-needed only for the Lake/editor project model (`lakefile.lean` requires
-`../lentil`):
+public release. Managed lifecycle uses the co-developed `lentil` sibling for
+both Bazel and the Lake/editor project model:
 
 ```sh
-for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lean-acme-widgets; do
+for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lentil lean-acme-widgets; do
   git clone "https://github.com/pb64-lean/$r"
 done
 cd lean-acme-widgets
@@ -110,7 +109,7 @@ bazel test //...
 
 Prerequisites: Bazel 8.5 (see `.bazelversion`; bazelisk recommended) and Nix
 — the Lean toolchain is nix-built from a pinned nixpkgs revision plus a Lean
-4.31-pre overlay. The end-to-end scripts additionally need Docker Compose,
+4.31 overlay. The end-to-end scripts additionally need Docker Compose,
 `grpcurl`, and `openssl`.
 
 ## Build & test
@@ -118,7 +117,7 @@ Prerequisites: Bazel 8.5 (see `.bazelversion`; bazelisk recommended) and Nix
 ```
 bazel test //...                 # includes transient PostgreSQL generation/live/compat tests
 bazel run //scripts:acme_load    # 8-second persistent-channel mixed CRUD load test
-scripts/acme-e2e.sh              # compose postgres + server + grpcurl, 24 checks
+scripts/acme-e2e.sh              # compose postgres + server + grpcurl, 26 checks
 scripts/acme-e2e.sh tls          # ... with the pg-lean → postgres link over TLS (verify-full)
 scripts/acme-grpc-tls.sh         # in-process gRPC-over-TLS end-to-end
 ```
@@ -127,14 +126,32 @@ The Compose PostgreSQL ports default to `54398` (plain) and `54397` (TLS).
 Set `ACME_POSTGRES_PORT` or `ACME_POSTGRES_TLS_PORT` to choose specific ports.
 The end-to-end scripts allocate free PostgreSQL ports through Docker unless
 these variables are explicitly set.
+For co-development with explicit Bazel module overrides, first build
+`//lean/Acme:acme_server` using those overrides, then run `acme-e2e.sh` with
+`ACME_SKIP_BUILD=1` to test that exact executable. CI builds by default.
+The same switch applies to `acme-grpc-tls.sh` after explicitly building
+`//Integration:grpc_tls_test`.
 
 `acme_server` composes its process with
 [lentil](https://github.com/pb64-lean/lentil): `@[lentil_config "ACME_"]`
 derives one `AcmeConfig` from the `ACME_` environment prefix, `@[lentil]`
 recipes autowire the postgres connection, repository, bearer-token table,
 request authenticator, proof-carrying WidgetService, gRPC registry, and
-terminal server instance, and `make_context AcmeContext` checks that dependency
-graph during elaboration and generates the startup code:
+terminal server instance. `@[lentil_managed]` owns signal waiters, PostgreSQL,
+health, and the listener; `make_managed_context AcmeContext` checks that graph
+and generates rollback-safe startup. Failed startup closes earlier resources,
+and shutdown quiesces all resources, joins outstanding work, then releases
+dependencies in reverse order. Cleanup failures are surfaced, not ignored.
+A failed drain retains dependencies instead of closing them underneath work;
+this process-level composition treats startup or cleanup failure as fatal.
+Request draining is unbounded: external supervisors may impose an explicit
+process deadline, but no timeout is interpreted as successful cleanup.
+
+The standard gRPC health service exposes `readiness` (and empty-name overall
+health) separately from `liveness`. Readiness becomes serving only after the
+application is constructed and becomes not-serving before listener shutdown;
+liveness stays serving while requests drain. Signal watchers and the server
+wait task are retained and released/joined. Configuration:
 
 | Variable | Type/default | Purpose |
 | --- | --- | --- |
@@ -218,19 +235,24 @@ does not run DDL: deployment must apply `db/migrations/0001_schema.sql` before
   `openssl s_client`. **Algorithm constraint:** a client offering none of
   those three algorithms gets a handshake failure rather than a fallback.
 
-- **Listener termination**: `Main.lean` shuts the listener down gracefully on
-  a stdin line or EOF (`Grpc.Server.shutdown` then `wait` to drain in-flight
-  RPCs). Both e2e scripts assert the process exits 0 after a shutdown signal.
+- **Listener termination**: `Main.lean` responds to POSIX SIGINT/SIGTERM,
+  withdraws readiness, stops admission, joins the server, and closes PostgreSQL.
+  Stdin/EOF no longer controls lifetime: it cannot provide interruptible joined
+  ownership. Both e2e modes assert exit 0 after actual SIGTERM delivery; the load
+  harness uses the same production path. `Lentil` separately tests real SIGINT.
 
 ## Toolchain
 
-Bazel builds with the shared Nix Lean 4.31-pre pinned at upstream commit
-`24bef91f9a20a45f074729e869461d374687de1c`. Lake and Lean-aware editors use
-`nightly-2026-04-25`, built from that same commit; `lakefile.lean` remains an
-editor/LSP project model rather than the authoritative build. Install it with
-`elan toolchain install leanprover/lean4-nightly:nightly-2026-04-25`. The
-`lean4-nightly` selector spelling is intentional because Lean4IJ maps it
-directly to Elan's on-disk nightly directory.
+Bazel builds with the shared Nix Lean 4.31.0 pinned at upstream commit
+`68218e876d2a38b1985b8590fff244a83c321783`. Lake and Lean-aware editors use
+the same release; `lakefile.lean` remains an editor/LSP project model rather
+than the authoritative build. Install it with
+`elan toolchain install leanprover/lean4:v4.31.0`.
+
+While testing unpublished gRPC/HTTP2 changes, explicitly select the sibling
+HTTP2 checkout without changing release dependency metadata:
+`bazel test //... --override_module=http2-lean=../http2-lean`, or
+`lake --packages=Integration/lake-workspace.json build Acme` for the editor graph.
 
 For Lean4IJ, refresh the Bazel-generated Lean sources before starting or
 restarting the language server:

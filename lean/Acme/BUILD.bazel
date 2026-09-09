@@ -65,9 +65,19 @@ lean_binary(
         ":auth",
         ":repo",
         ":service",
+        ":lifecycle",
         "@lentil//:lentil",
+        "@lentil//:signals",
+        "@rules_lean_grpc//:grpc_standard_service_descriptors",
         "@pg_lean//:pg_lean",
     ],
+)
+
+lean_library(
+    name = "lifecycle",
+    srcs = ["Lifecycle.lean"],
+    strip_module_prefix = "lean",
+    deps = ["@lentil//:managed", "@rules_lean_grpc//:grpc_lean"],
 )
 
 # Compile-time audit: the capability-soundness and row-roundtrip theorems

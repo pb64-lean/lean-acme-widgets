@@ -28,18 +28,13 @@ local_path_override(
 )
 
 # ── dependency injection + environment configuration ────────────────────────
-# Consumed remotely (no sibling checkout required): pinned to a lentil main
-# commit until registry releases are published. Lentil's own rules_lean
-# archive_override is ignored here (non-root); the local_path_override above
-# satisfies its rules_lean dependency.
+# Managed lifecycle is co-developed with the sibling Lentil checkout, like
+# the service's other application-facing dependencies. Its root-owned
+# rules_lean override remains the one selected above.
 bazel_dep(name = "lentil", version = "0.1.0")
-archive_override(
+local_path_override(
     module_name = "lentil",
-    integrity = "sha256-xBUDvEqSqCGUeFGr9zlPcyFJc69wy0FqFKRdHGV9tLE=",
-    strip_prefix = "lentil-0833c22af2116b206dec14503f775bf3e488bed9",
-    urls = [
-        "https://github.com/pb64-lean/lentil/archive/0833c22af2116b206dec14503f775bf3e488bed9.tar.gz",
-    ],
+    path = "../lentil",
 )
 
 # ── proto/gRPC codegen rules and pure-Lean gRPC runtime ─────────────────────

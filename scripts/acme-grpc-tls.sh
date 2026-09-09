@@ -13,7 +13,9 @@ export ACME_POSTGRES_PORT="${ACME_POSTGRES_PORT:-0}"
 cleanup() { docker compose down -v >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-bazel build //Integration:grpc_tls_test
+if [[ "${ACME_SKIP_BUILD:-0}" != "1" ]]; then
+  bazel build //Integration:grpc_tls_test --jobs="${ACME_BUILD_JOBS:-4}"
+fi
 
 # Fresh Ed25519 leaf for the gRPC listener. The raw 32-byte seed is the tail of
 # the PKCS8 DER; the client trusts the leaf PEM directly as its anchor.
