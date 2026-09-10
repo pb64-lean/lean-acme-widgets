@@ -18,4 +18,4 @@ jobs:
   test:
     uses: pb64-lean/.github/.github/workflows/bazel-ci.yml@main
     with:
-      siblings: rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lentil
+      siblings: rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx

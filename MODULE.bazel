@@ -28,13 +28,15 @@ local_path_override(
 )
 
 # ── dependency injection + environment configuration ────────────────────────
-# Managed lifecycle is co-developed with the sibling Lentil checkout, like
-# the service's other application-facing dependencies. Its root-owned
-# rules_lean override remains the one selected above.
+# The lifecycle contract is pinned independently of sibling development.
 bazel_dep(name = "lentil", version = "0.1.0")
-local_path_override(
+archive_override(
     module_name = "lentil",
-    path = "../lentil",
+    integrity = "sha256-lgaK6uRWDdEl+pDRmV92dBeAJD/0mYDbaqT/5lY7dgA=",
+    strip_prefix = "lentil-5b3fe632ba17fde042890149dc1e674fb5f5731c",
+    urls = [
+        "https://github.com/pb64-lean/lentil/archive/5b3fe632ba17fde042890149dc1e674fb5f5731c.tar.gz",
+    ],
 )
 
 # ── proto/gRPC codegen rules and pure-Lean gRPC runtime ─────────────────────

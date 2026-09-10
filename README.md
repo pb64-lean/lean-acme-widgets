@@ -14,9 +14,8 @@ Widgets** service, tying the sibling repositories together end to end —
 - `lean-pgx` — DDL/query analysis, generated checked records and runners,
   runtime schema attachment, and relational contract metadata
 - `pg-lean` — PostgreSQL wire/TLS transport beneath lean-pgx
-- `lentil` — compile-time dependency injection and environment-backed
-  configuration (consumed remotely from a pinned commit, not a sibling
-  checkout)
+- `lentil` — compile-time dependency injection, environment-backed
+  configuration, and managed lifecycle, pinned to a public commit
 
 The service enforces **authorization by construction** without putting
 authorization envelopes on the wire. RPCs use their ordinary request messages;
@@ -92,15 +91,12 @@ an ordinal rank or silently expands role implications.
 
 ## Getting the source
 
-The eight co-developed ecosystem repositories must be checked out side by
-side — `MODULE.bazel` wires those siblings via Bzlmod `local_path_override`,
-and because transitive overrides are ignored for non-root modules, this root
-workspace re-declares all of them. Bazel fetches `http2-lean` from its pinned
-public release. Managed lifecycle uses the co-developed `lentil` sibling for
-both Bazel and the Lake/editor project model:
+Check out these seven repositories side by side. `MODULE.bazel` supplies the
+root-owned Bzlmod overrides. Bazel fetches `http2-lean` and `lentil` from
+immutable public archives; the Lake/editor project pins the same Lentil commit.
 
 ```sh
-for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lentil lean-acme-widgets; do
+for r in rules_lean grpc-lean protovalidate-lean tls13-lean pg-lean lean-pgx lean-acme-widgets; do
   git clone "https://github.com/pb64-lean/$r"
 done
 cd lean-acme-widgets
