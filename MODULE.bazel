@@ -51,10 +51,10 @@ local_path_override(
 bazel_dep(name = "http2-lean", version = "0.1.0", repo_name = "http2_lean")
 archive_override(
     module_name = "http2-lean",
-    integrity = "sha256-JkQPBLVdgICr3ZWYejr6iDQ1aYHHYS5VEFK9IOkgGeY=",
-    strip_prefix = "http2-lean-4dfaa5686ccdc3e90251d7146496a9708d2752d1",
+    integrity = "sha256-GhJ4sgNpK6ny0QvhjfmcUx0nlb6uVogY8wJYkJp91Ng=",
+    strip_prefix = "http2-lean-6ab07dd24d35a2bcef1cdefadba4c2bd6dd640f7",
     urls = [
-        "https://github.com/pb64-lean/http2-lean/archive/4dfaa5686ccdc3e90251d7146496a9708d2752d1.tar.gz",
+        "https://github.com/pb64-lean/http2-lean/archive/6ab07dd24d35a2bcef1cdefadba4c2bd6dd640f7.tar.gz",
     ],
 )
 
